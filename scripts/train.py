@@ -376,20 +376,30 @@ def main(config: _config.TrainConfig):
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
+    # [4/8] 나중에 smoke patch 위해 수정
     # Log images from first batch to sanity check.
-    images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
-    ]
-    wandb.log({"camera_views": images_to_log}, step=0)
+    if config.wandb_enabled:
+        images_to_log = [
+            wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
+            for i in range(min(5, len(next(iter(batch[0].images.values())))))
+        ]
+        wandb.log({"camera_views": images_to_log}, step=0)
+    ###################################
 
     # Get norm_stats for correlation matrix loading
     data_config = data_loader.data_config()
+    is_fake_smoke = getattr(data_config, "repo_id", None) == "fake"
+
     if data_config.norm_stats is None:
-        raise ValueError(
-            "norm_stats not found. Run compute_norm_stats.py to generate normalization statistics."
-        )
-    norm_stats = data_config.norm_stats
+        if is_fake_smoke:
+            logging.info("fake smoke 경로이므로 norm_stats 없이 계속 진행합니다.")
+            norm_stats = None
+        else:
+            raise ValueError(
+                "norm_stats not found. Run compute_norm_stats.py to generate normalization statistics."
+            )
+    else:
+        norm_stats = data_config.norm_stats
 
     train_state, train_state_sharding = init_train_state(
         config, init_rng, mesh, resume=resuming, norm_stats=norm_stats
@@ -400,11 +410,12 @@ def main(config: _config.TrainConfig):
     if resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
         
-        # Reload correlation matrix after restore
-        model = nnx.merge(train_state.model_def, train_state.params)
-        model.load_correlation_matrix(norm_stats)
-        logging.info("Reloaded correlation matrix after checkpoint restore")
-        train_state = dataclasses.replace(train_state, model_def=nnx.graphdef(model))
+        # correlation matrix는 norm_stats가 있을 때만 다시 로드
+        if norm_stats is not None:
+            model = nnx.merge(train_state.model_def, train_state.params)
+            model.load_correlation_matrix(norm_stats)
+            logging.info("Reloaded correlation matrix after checkpoint restore")
+            train_state = dataclasses.replace(train_state, model_def=nnx.graphdef(model))
 
     ptrain_step = jax.jit(
         functools.partial(train_step, config),
@@ -435,7 +446,10 @@ def main(config: _config.TrainConfig):
                           if "loss" in k or "accuracy" in k or k in ["grad_norm", "param_norm", "grad_norm_vlm", "grad_norm_action_expert"]}
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in main_metrics.items())
             pbar.write(f"Step {step}: {info_str}")
-            wandb.log(reduced_info, step=step)
+            
+            if config.wandb_enabled:
+                wandb.log(reduced_info, step=step)
+
             infos = []
         batch = next(data_iter)
 

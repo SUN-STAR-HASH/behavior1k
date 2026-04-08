@@ -90,49 +90,49 @@ class DataLoaderImpl(_openpi_data_loader.DataLoader):
         for batch in self._data_loader:
             yield Observation.from_dict(batch), batch["actions"]
 
-
-def _expand_root(root: str | None) -> str | None:
-    """Expand '~' and return an absolute path."""
-    if root is None:
-        return None
-    return os.path.abspath(os.path.expanduser(root))
-
-
-def _get_dataset_fps(repo_id: str, default_fps: float = 30.0) -> float:
-    """Try to read dataset fps from LeRobot metadata, otherwise fall back."""
-    if LeRobotDatasetMetadata is None:
-        logger.warning(
-            "LeRobotDatasetMetadata is not available in this lerobot install. "
-            "Falling back to %.1f fps.",
-            default_fps,
-        )
-        return default_fps
-    try:
-        dataset_meta = LeRobotDatasetMetadata(repo_id)
-        fps = getattr(dataset_meta, "fps", None)
-        if fps is not None:
-            return float(fps)
-    except Exception as exc:
-        logger.warning(
-            "Could not read dataset fps from LeRobot metadata for %s. "
-            "Falling back to %.1f fps. (%s)",
-            repo_id,
-            default_fps,
-            exc,
-        )
-    return default_fps
+# [4/8] 삭제 후보
+# def _expand_root(root: str | None) -> str | None:
+#     """Expand '~' and return an absolute path."""
+#     if root is None:
+#         return None
+#     return os.path.abspath(os.path.expanduser(root))
 
 
-def _build_delta_timestamps(
-    action_sequence_keys: tuple[str, ...] | list[str],
-    action_horizon: int,
-    fps: float,
-) -> dict[str, list[float]]:
-    """Build delta timestamps expected by LeRobot / BehaviorLeRobotDataset."""
-    return {
-        key: [t / fps for t in range(action_horizon)]
-        for key in action_sequence_keys
-    }
+# def _get_dataset_fps(repo_id: str, default_fps: float = 30.0) -> float:
+#     """Try to read dataset fps from LeRobot metadata, otherwise fall back."""
+#     if LeRobotDatasetMetadata is None:
+#         logger.warning(
+#             "LeRobotDatasetMetadata is not available in this lerobot install. "
+#             "Falling back to %.1f fps.",
+#             default_fps,
+#         )
+#         return default_fps
+#     try:
+#         dataset_meta = LeRobotDatasetMetadata(repo_id)
+#         fps = getattr(dataset_meta, "fps", None)
+#         if fps is not None:
+#             return float(fps)
+#     except Exception as exc:
+#         logger.warning(
+#             "Could not read dataset fps from LeRobot metadata for %s. "
+#             "Falling back to %.1f fps. (%s)",
+#             repo_id,
+#             default_fps,
+#             exc,
+#         )
+#     return default_fps
+
+
+# def _build_delta_timestamps(
+#     action_sequence_keys: tuple[str, ...] | list[str],
+#     action_horizon: int,
+#     fps: float,
+# ) -> dict[str, list[float]]:
+#     """Build delta timestamps expected by LeRobot / BehaviorLeRobotDataset."""
+#     return {
+#         key: [t / fps for t in range(action_horizon)]
+#         for key in action_sequence_keys
+#     }
 
 
 # OmniGibson 버전에 따라 BehaviorLeRobotDataset의 import 경로가 달라질 수 있다.
@@ -141,131 +141,131 @@ def _build_delta_timestamps(
 # 이 함수가 필요한 이유는:
 # - 연구실/서버/개인 PC마다 OmniGibson 버전 차이가 날 수 있고
 # - 같은 코드라도 환경에 따라 import 에러가 날 수 있기 때문이다.
-def _get_behavior_lerobot_dataset_cls():
-    """Import BehaviorLeRobotDataset from any known OmniGibson path.
+# def _get_behavior_lerobot_dataset_cls():
+#     """Import BehaviorLeRobotDataset from any known OmniGibson path.
 
-    OmniGibson 버전에 따라 import path가 달라질 수 있으므로 여러 후보를 시도한다.
-    """
-    candidate_modules = [
-        "omnigibson.learning.datas.lerobot_dataset",
-        "omnigibson.learning.data.lerobot_dataset",
-        "omnigibson.learning.utils.lerobot_dataset",
-    ]
-    for module_name in candidate_modules:
-        try:
-            module = importlib.import_module(module_name)
-        except Exception:
-            continue
-        dataset_cls = getattr(module, "BehaviorLeRobotDataset", None)
-        if dataset_cls is not None:
-            logger.info("Using BehaviorLeRobotDataset from %s", module_name)
-            return dataset_cls
-    return None
-
-
-# BehaviorLeRobotDataset 생성자 시그니처는 버전마다 조금씩 다를 수 있다.
-# 그래서 kwargs를 한 번에 고정하지 않고,
-# "가장 많은 옵션을 주는 경우"부터 "최소 인자만 주는 경우"까지 순서대로 시도한다.
-#
-# 여기서 중요한 포인트는:
-# - download_videos=False 로 스모크 테스트 부담을 줄이고,
-# - episodes / root / local_only 같은 옵션이 환경에 따라 안 먹을 수 있으므로
-#   TypeError를 기준으로 안전하게 fallback 한다는 점이다.
-#
-# 즉, 이 함수는 데이터셋 생성 자체보다 "환경 차이를 견디는 호환 레이어" 역할이 더 크다.
-def _instantiate_behavior_dataset(
-    dataset_cls,
-    repo_id: str,
-    root: str | None,
-    delta_timestamps: dict[str, list[float]],
-    episodes_index: list[int] | None,
-    seed: int | None,
-):
-    """Instantiate BehaviorLeRobotDataset with a few signature fallbacks.
-
-    OmniGibson / BEHAVIOR 버전에 따라 생성자 인자가 조금씩 다를 수 있어서
-    여러 kwargs 조합을 순차적으로 시도한다.
-    """
-    common_kwargs = {
-        "repo_id": repo_id,
-        "delta_timestamps": delta_timestamps,
-    }
-
-    candidate_kwarg_sets: list[dict[str, object]] = [
-        {
-            "root": root,
-            "episodes": episodes_index,
-            "download_videos": False,
-            "local_only": False,
-            "chunk_streaming_using_keyframe": False,
-            "seed": seed,
-        },
-        {
-            "root": root,
-            "episodes": episodes_index,
-            "download_videos": False,
-            "local_only": False,
-            "chunk_streaming_using_keyframe": False,
-        },
-        {
-            "root": root,
-            "episodes": episodes_index,
-            "download_videos": False,
-            "local_only": False,
-        },
-        {
-            "root": root,
-            "episodes": episodes_index,
-            "download_videos": False,
-        },
-        {
-            "root": root,
-            "episodes": episodes_index,
-        },
-        {
-            "root": root,
-        },
-        {},
-    ]
-
-    errors: list[str] = []
-    for extra_kwargs in candidate_kwarg_sets:
-        kwargs = {
-            **common_kwargs,
-            **{k: v for k, v in extra_kwargs.items() if v is not None},
-        }
-        try:
-            dataset = dataset_cls(**kwargs)
-            logger.info(
-                "Created BehaviorLeRobotDataset with kwargs: %s",
-                sorted(kwargs.keys()),
-            )
-            return dataset
-        except TypeError as exc:
-            errors.append(f"{sorted(kwargs.keys())}: {exc}")
-
-    # 랩탑 / fake smoke 목적에서는 HF remote fallback이 문제를 일으켜서 의도적으로 비활성화    
-    raise TypeError(
-        "Could not instantiate BehaviorLeRobotDataset with any known signature.\n"
-        + "\n".join(errors)
-    )
+#     OmniGibson 버전에 따라 import path가 달라질 수 있으므로 여러 후보를 시도한다.
+#     """
+#     candidate_modules = [
+#         "omnigibson.learning.datas.lerobot_dataset",
+#         "omnigibson.learning.data.lerobot_dataset",
+#         "omnigibson.learning.utils.lerobot_dataset",
+#     ]
+#     for module_name in candidate_modules:
+#         try:
+#             module = importlib.import_module(module_name)
+#         except Exception:
+#             continue
+#         dataset_cls = getattr(module, "BehaviorLeRobotDataset", None)
+#         if dataset_cls is not None:
+#             logger.info("Using BehaviorLeRobotDataset from %s", module_name)
+#             return dataset_cls
+#     return None
 
 
-# 랩탑 스모크 환경에서는 LeRobot fallback을 의도적으로 막아 둔다.
-# 이유는 fallback 경로가 로컬 데이터만 읽는 것처럼 보여도,
-# 실제로는 Hugging Face metadata 조회나 원격 다운로드를 건드릴 수 있기 때문이다.
-#
-# 즉, "OmniGibson이 없으면 그냥 더 느리게라도 진행"이 아니라,
-# "잘못하면 원격 접근으로 흐름이 꼬이므로 여기서 명시적으로 중단"하는 정책이다.
-def _instantiate_fallback_lerobot_dataset(
-    repo_id: str,
-    root: str | None,
-    delta_timestamps: dict[str, list[float]],
-):
-    raise RuntimeError(
-        "OmniGibson is not installed in this laptop environment, "
-        "and LeRobot fallback is disabled because it triggers remote HF downloads."
-    )
+# # BehaviorLeRobotDataset 생성자 시그니처는 버전마다 조금씩 다를 수 있다.
+# # 그래서 kwargs를 한 번에 고정하지 않고,
+# # "가장 많은 옵션을 주는 경우"부터 "최소 인자만 주는 경우"까지 순서대로 시도한다.
+# #
+# # 여기서 중요한 포인트는:
+# # - download_videos=False 로 스모크 테스트 부담을 줄이고,
+# # - episodes / root / local_only 같은 옵션이 환경에 따라 안 먹을 수 있으므로
+# #   TypeError를 기준으로 안전하게 fallback 한다는 점이다.
+# #
+# # 즉, 이 함수는 데이터셋 생성 자체보다 "환경 차이를 견디는 호환 레이어" 역할이 더 크다.
+# def _instantiate_behavior_dataset(
+#     dataset_cls,
+#     repo_id: str,
+#     root: str | None,
+#     delta_timestamps: dict[str, list[float]],
+#     episodes_index: list[int] | None,
+#     seed: int | None,
+# ):
+    # """Instantiate BehaviorLeRobotDataset with a few signature fallbacks.
+
+    # OmniGibson / BEHAVIOR 버전에 따라 생성자 인자가 조금씩 다를 수 있어서
+    # 여러 kwargs 조합을 순차적으로 시도한다.
+    # """
+    # common_kwargs = {
+    #     "repo_id": repo_id,
+    #     "delta_timestamps": delta_timestamps,
+    # }
+
+    # candidate_kwarg_sets: list[dict[str, object]] = [
+    #     {
+    #         "root": root,
+    #         "episodes": episodes_index,
+    #         "download_videos": False,
+    #         "local_only": False,
+    #         "chunk_streaming_using_keyframe": False,
+    #         "seed": seed,
+    #     },
+    #     {
+    #         "root": root,
+    #         "episodes": episodes_index,
+    #         "download_videos": False,
+    #         "local_only": False,
+    #         "chunk_streaming_using_keyframe": False,
+    #     },
+    #     {
+    #         "root": root,
+    #         "episodes": episodes_index,
+    #         "download_videos": False,
+    #         "local_only": False,
+    #     },
+    #     {
+    #         "root": root,
+    #         "episodes": episodes_index,
+    #         "download_videos": False,
+    #     },
+    #     {
+    #         "root": root,
+    #         "episodes": episodes_index,
+    #     },
+    #     {
+    #         "root": root,
+    #     },
+    #     {},
+    # ]
+
+    # errors: list[str] = []
+    # for extra_kwargs in candidate_kwarg_sets:
+    #     kwargs = {
+    #         **common_kwargs,
+    #         **{k: v for k, v in extra_kwargs.items() if v is not None},
+    #     }
+    #     try:
+    #         dataset = dataset_cls(**kwargs)
+    #         logger.info(
+    #             "Created BehaviorLeRobotDataset with kwargs: %s",
+    #             sorted(kwargs.keys()),
+    #         )
+    #         return dataset
+    #     except TypeError as exc:
+    #         errors.append(f"{sorted(kwargs.keys())}: {exc}")
+
+    # # 랩탑 / fake smoke 목적에서는 HF remote fallback이 문제를 일으켜서 의도적으로 비활성화    
+    # raise TypeError(
+    #     "Could not instantiate BehaviorLeRobotDataset with any known signature.\n"
+    #     + "\n".join(errors)
+    # )
+
+
+# # 랩탑 스모크 환경에서는 LeRobot fallback을 의도적으로 막아 둔다.
+# # 이유는 fallback 경로가 로컬 데이터만 읽는 것처럼 보여도,
+# # 실제로는 Hugging Face metadata 조회나 원격 다운로드를 건드릴 수 있기 때문이다.
+# #
+# # 즉, "OmniGibson이 없으면 그냥 더 느리게라도 진행"이 아니라,
+# # "잘못하면 원격 접근으로 흐름이 꼬이므로 여기서 명시적으로 중단"하는 정책이다.
+# def _instantiate_fallback_lerobot_dataset(
+#     repo_id: str,
+#     root: str | None,
+#     delta_timestamps: dict[str, list[float]],
+# ):
+#     raise RuntimeError(
+#         "OmniGibson is not installed in this laptop environment, "
+#         "and LeRobot fallback is disabled because it triggers remote HF downloads."
+#     )
 
 
 # 이 파일의 핵심 분기점.
@@ -368,6 +368,9 @@ def create_behavior_dataset(
                     scale=0.05,
                     size=(action_horizon, 23),
                 ).astype(np.float32)
+
+                # fake smoke에서도 subset task만 쓰게 맞춤
+                selected_task_id = int(SELECTED_TASKS[idx % len(SELECTED_TASKS)])
 
                 return {
                     "observation.images.rgb.head": head_rgb,
