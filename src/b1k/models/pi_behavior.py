@@ -37,6 +37,7 @@
 
 import logging
 import pathlib
+import os #[4/9 추가]
 
 import einops
 import flax.nnx as nnx
@@ -401,6 +402,14 @@ class PiBehavior(_model.BaseModel):
         # 학습/추론 모드 플래그.
         # train() / eval() 호출로 자동 변경된다.
         self.deterministic = True  # 기본값은 추론 모드(dropout 등 비활성화)
+
+        # [4/9 추가] 디버그 trace 출력용 helper
+        # 환경변수 B1K_DEBUG_TRACE=1 일 때만 shape 로그를 찍어서
+        # 평소 실행에서는 로그가 너무 많아지지 않게 한다.
+        def _debug_trace(self, msg: str):
+            if os.environ.get("B1K_DEBUG_TRACE", "0") == "1":
+                logger.info(f"[TRACE] {msg}")
+        #####################
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Stage 인코딩
@@ -938,10 +947,22 @@ class PiBehavior(_model.BaseModel):
             # FAST 토큰은 전부 인과적(causal/AR): 앞 토큰만 볼 수 있다.
             ar_mask += [True] * shifted_tokens.shape[1]
 
-        # 모든 토큰을 시퀀스 차원으로 이어 붙인다.
-        tokens = jnp.concatenate(tokens, axis=1)          # [B, total_seq, 2048]
-        input_mask = jnp.concatenate(input_mask, axis=1)  # [B, total_seq]
-        ar_mask = jnp.array(ar_mask)                       # [total_seq] bool
+        # [4/9 추가] prefix 토큰 구성이 끝난 뒤 shape를 남긴다.
+        # 여기서 확인하고 싶은 건:
+        # - 최종 prefix token 길이
+        # - input mask 길이
+        # - autoregressive mask 길이
+        tokens = jnp.concatenate(tokens, axis=1)
+        input_mask = jnp.concatenate(input_mask, axis=1)
+        ar_mask = jnp.array(ar_mask)
+
+        self._debug_trace(
+            f"embed_prefix done: "
+            f"tokens={tokens.shape}, "
+            f"input_mask={input_mask.shape}, "
+            f"ar_mask={ar_mask.shape}"
+        ) # [total_seq] bool
+        ############################
 
         return tokens, input_mask, ar_mask
 
@@ -1021,9 +1042,21 @@ class PiBehavior(_model.BaseModel):
         # 첫 번째가 True인 이유: prefix(이미지/task/state)가 action을 볼 수 없도록.
         ar_mask += [True] + ([False] * (self.action_horizon - 1))
 
-        tokens = jnp.concatenate(tokens, axis=1)          # [B, action_horizon, width]
-        input_mask = jnp.concatenate(input_mask, axis=1)  # [B, action_horizon]
-        ar_mask = jnp.array(ar_mask)                       # [action_horizon]
+        # [4/9 추가] suffix(action 쪽) 토큰 구성이 끝난 뒤 shape를 남긴다.
+        # 여기서는 noisy action이 projection된 뒤 token 길이와
+        # time embedding에서 나온 adarms_cond shape까지 같이 본다.
+        tokens = jnp.concatenate(tokens, axis=1)
+        input_mask = jnp.concatenate(input_mask, axis=1)
+        ar_mask = jnp.array(ar_mask)
+
+        self._debug_trace(
+            f"embed_suffix done: "
+            f"tokens={tokens.shape}, "
+            f"input_mask={input_mask.shape}, "
+            f"ar_mask={ar_mask.shape}, "
+            f"adarms_cond={adarms_cond.shape}"
+        )                       # [action_horizon]
+        ####################
 
         return tokens, input_mask, ar_mask, adarms_cond
 
@@ -1103,6 +1136,17 @@ class PiBehavior(_model.BaseModel):
         # prefix_mask:   [B, prefix_len] - 유효한 토큰 위치
         # prefix_ar_mask: [prefix_len] - AR 마스크
 
+        # [4/9 추가] embed_prefix 결과 shape 확인
+        # prefix 쪽에서 토큰 길이가 비정상적으로 늘어나거나 mask 길이가 안 맞는지
+        # early stage에서 바로 확인하려는 로그다.
+        self._debug_trace(
+            f"after embed_prefix: "
+            f"prefix_tokens={prefix_tokens.shape}, "
+            f"prefix_mask={prefix_mask.shape}, "
+            f"prefix_ar_mask={prefix_ar_mask.shape}"
+        )
+        ######################
+
         # ── 2. Prefix KV cache 계산 (한 번만!) ────────────────────────────
         # Attention mask를 만들고 PaliGemma LLM을 실행해서 KV cache를 생성한다.
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
@@ -1117,6 +1161,18 @@ class PiBehavior(_model.BaseModel):
         )
         # prefix_out: [B, prefix_len, 2048] - 각 prefix 토큰의 출력
         # kv_cache_full: 모든 prefix 레이어의 KV cache
+
+        # [4/9 추가] prefix를 LLM에 통과시킨 뒤 출력과 KV cache shape를 기록
+        # 여기서 KV cache 길이/헤드 수가 맞는지 보면
+        # 이후 suffix attention에서 어디서 꼬이는지 빨리 찾을 수 있다.
+        cache_k, cache_v = kv_cache_full
+        self._debug_trace(
+            f"after prefix llm: "
+            f"prefix_out={prefix_out.shape}, "
+            f"kv_cache_k={cache_k.shape}, "
+            f"kv_cache_v={cache_v.shape}"
+        )
+        #####################
 
         # ── 3. Stage prediction (보조 학습) ────────────────────────────────
         # stage conditioning 경로(tokenized_prompt.shape[1] > 1)에서만 실행된다.

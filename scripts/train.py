@@ -4,6 +4,7 @@ Training script for BEHAVIOR-1K solution.
 Based on https://github.com/PhysicalIntelligence/openpi/blob/behavior/openpi/scripts/train.py with custom modifications.
 """
 
+import subprocess # [4/9 추가]
 import dataclasses
 import functools
 import logging
@@ -90,6 +91,29 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
     if log_code:
         wandb.run.log_code(epath.Path(__file__).parent.parent)
 
+# [4/9 추가]
+def log_gpu_mem(tag: str):
+    """현재 GPU 메모리 사용량을 로그로 찍는다."""
+    try:
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+        ).strip().splitlines()[0]
+        used, total = [int(x.strip()) for x in out.split(",")]
+        logging.info(f"[GPU MEM] {tag}: {used} MiB / {total} MiB")
+    except Exception as e:
+        logging.info(f"[GPU MEM] {tag}: unavailable ({e})")
+#############################
+
+def block_and_log(tag: str, x=None):
+    """JAX 계산을 끝까지 block한 뒤 GPU 메모리 로그를 찍는다."""
+    if x is not None:
+        jax.block_until_ready(x)
+    log_gpu_mem(tag)
 
 def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shape: at.Params) -> at.Params:
     """Loads and validates the weights. Returns a loaded subset of the weights."""
@@ -366,15 +390,23 @@ def main(config: _config.TrainConfig):
     )
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
+    # [4/9 수정]
+    log_gpu_mem("before data_loader create")
+
     data_loader = _data_loader.create_behavior_data_loader(
         config,
         sharding=data_sharding,
         shuffle=True,
     )
 
+    log_gpu_mem("after data_loader create")
+
     data_iter = iter(data_loader)
     batch = next(data_iter)
+
+    log_gpu_mem("after first batch")
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
+    ###############################
 
     # [4/8] 나중에 smoke patch 위해 수정
     # Log images from first batch to sanity check.
@@ -401,15 +433,22 @@ def main(config: _config.TrainConfig):
     else:
         norm_stats = data_config.norm_stats
 
+    # [4/9 수정]
     train_state, train_state_sharding = init_train_state(
         config, init_rng, mesh, resume=resuming, norm_stats=norm_stats
     )
-    jax.block_until_ready(train_state)
+
+    block_and_log("after init_train_state", train_state)
     logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
+    #################
 
     if resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
         
+        # [4/9 추가]
+        block_and_log("after restore_state", train_state)
+        ##############
+
         # correlation matrix는 norm_stats가 있을 때만 다시 로드
         if norm_stats is not None:
             model = nnx.merge(train_state.model_def, train_state.params)
@@ -423,6 +462,18 @@ def main(config: _config.TrainConfig):
         out_shardings=(train_state_sharding, replicated_sharding),
         donate_argnums=(1,),
     )
+
+    # [4/9 추가]
+    log_gpu_mem("before first ptrain_step")
+
+    try:
+        train_state, info = ptrain_step(train_rng, train_state, batch)
+        block_and_log("after first ptrain_step", info["loss"])
+        logging.info(f"[TRACE] first step loss={float(jax.device_get(info['loss'])):.6f}")
+    except Exception:
+        logging.exception("[TRACE] failed during first ptrain_step")
+        raise
+    ################
 
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
