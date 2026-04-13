@@ -741,6 +741,110 @@ _CONFIGS = [
         fsdp_devices=1,
         val_num_batches=1,
     ),
+
+    TrainConfig(
+        # A100 서버에서 "실데이터 기반 smoke test"를 바로 돌리기 위한 설정
+        # 목적:
+        # 1) 데이터 로더가 실제 BEHAVIOR-1K 데이터를 읽는지
+        # 2) pretrained pi0.5 weight 로딩이 되는지
+        # 3) full train loop가 최소한 몇 step 이상 정상 진행되는지
+        # 4) step 100에서 checkpoint 저장이 되는지
+        name="pi_behavior_b1k_a100_smoke",
+
+        # 실행 시 outputs/checkpoints/pi_behavior_b1k_a100_smoke/a100_smoke
+        # 같은 식으로 저장될 실험 이름
+        exp_name="a100_smoke",
+
+        project_name="B1K",
+
+        model=pi_behavior_config.PiBehaviorConfig(
+            # BEHAVIOR 쪽 기본 action shape 유지
+            action_horizon=30,
+            action_dim=32,
+
+            # ---- smoke 단계에서는 baseline 성격으로 단순하게 ----
+            # 추가 기법들은 끄고,
+            # "실데이터 + pretrained + 학습 루프 정상 동작"만 먼저 확인
+            use_correlated_noise=False,
+            correlation_beta=0.0,
+
+            use_fast_auxiliary=False,
+            fast_loss_weight=0.0,
+
+            use_kv_transform=False,
+            use_knowledge_insulation=False,
+            subtask_loss_weight=0.0,
+
+            # vision backbone은 freeze해서 불필요한 학습 부담 감소
+            freeze_vision_backbone=True,
+        ),
+
+        data=LeRobotB1KDataConfig(
+            # 실데이터 smoke이므로 fake가 아니라 실제 repo 사용
+            repo_id="IliaLarchenko/behavior_224_rgb",
+
+            base_config=DataConfig(
+                # B1K는 문자열 prompt 대신 task embedding 흐름 사용
+                prompt_from_task=False,
+
+                # 현재 서버 실제 데이터 경로
+                behavior_dataset_root="/home/data/datasets/behavior_224_rgb",
+
+                # smoke에서는 per-timestamp normalization은 일단 끔
+                use_per_timestamp_norm=False,
+            ),
+
+            # baseline smoke이므로 action 변환도 단순하게 유지
+            use_delta_joint_actions=False,
+            use_fast_tokenization=False,
+        ),
+
+        # 아주 짧은 smoke용 scheduler
+        # 오래 학습하려는 게 아니라 "일단 도는지" 확인이 목적
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=20,
+            peak_lr=1e-4,
+            decay_steps=200,
+            decay_lr=1e-5,
+        ),
+
+        # flow matching sample도 1개로 최소화
+        num_flow_samples=1,
+
+        # pretrained pi0.5 base weight 사용
+        # smoke라도 "완전 랜덤 초기화"가 아니라 실제 baseline 방향과 맞춘다
+        weight_loader=weight_loaders.PiBehaviorWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+
+        # 핵심: 짧은 smoke
+        num_train_steps=200,
+
+        # 10 step마다 로그 확인
+        log_interval=10,
+
+        # step 100에서 checkpoint 저장 확인 가능
+        save_interval=100,
+        keep_period=200,
+
+        # assets / checkpoints는 현재 저장소 내부 outputs 아래로 저장
+        assets_base_dir="./outputs/assets",
+        checkpoint_base_dir="./outputs/checkpoints",
+
+        # A100이라도 smoke 단계에서는 너무 크게 안 잡고 시작
+        num_workers=2,
+        batch_size=4,
+
+        # 필요하면 True로 바꿔도 되지만,
+        # 처음 서버 bring-up이면 꺼두는 편이 덜 번거로움
+        wandb_enabled=False,
+
+        # 현재 서버는 단일 A100 기준
+        fsdp_devices=1,
+
+        # validation은 최소
+        val_num_batches=1,
+    ),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
