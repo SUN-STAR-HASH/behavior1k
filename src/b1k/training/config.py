@@ -856,6 +856,86 @@ _CONFIGS = [
         # validation은 최소
         val_num_batches=1,
     ),
+
+    TrainConfig(
+        # A100 한 장으로 1주일 안에 끝내는 것을 목표로 한 실제 baseline 실험 설정.
+        #
+        # 1등팀의 200k step / 8xH200 학습을 그대로 따라가면 A100 1장에서는
+        # 시간이 너무 오래 걸린다. 그래서 이 설정은 "대회 재현"이 아니라
+        # "12개 task subset에서 빠르게 비교 가능한 baseline checkpoint 만들기"가 목적이다.
+        #
+        # 실행 예:
+        # uv run scripts/train.py pi_behavior_b1k_a100_week --overwrite
+        #
+        # 중간에 끊겼을 때 이어서 실행:
+        # uv run scripts/train.py pi_behavior_b1k_a100_week --resume
+        name="pi_behavior_b1k_a100_week",
+        exp_name="a100_week_10k",
+        project_name="B1K",
+
+        model=pi_behavior_config.PiBehaviorConfig(
+            action_horizon=30,
+            action_dim=32,
+
+            # ---- baseline 유지 ----
+            # 여기서는 사용자가 의도한 "Pi0.5 backbone + task embedding + flow matching"에
+            # 최대한 가깝게 두기 위해 1등팀의 추가 기법을 꺼둔다.
+            use_correlated_noise=False,
+            correlation_beta=0.0,
+            use_fast_auxiliary=False,
+            fast_loss_weight=0.0,
+            use_kv_transform=False,
+            use_knowledge_insulation=False,
+            subtask_loss_weight=0.0,
+
+            # A100 1장에서는 전체 vision backbone까지 같이 학습하면 메모리와 시간이 커진다.
+            # 우선 backbone은 freeze해서 task embedding / action expert 쪽 실험을 빠르게 본다.
+            freeze_vision_backbone=True,
+        ),
+
+        data=LeRobotB1KDataConfig(
+            repo_id="IliaLarchenko/behavior_224_rgb",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                behavior_dataset_root="/home/data/datasets/behavior_224_rgb",
+                use_per_timestamp_norm=False,
+            ),
+            use_delta_joint_actions=False,
+            use_fast_tokenization=False,
+        ),
+
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            # 10k step짜리 짧은 실험이라 warmup도 짧게 잡는다.
+            warmup_steps=500,
+            peak_lr=1e-4,
+            decay_steps=10_000,
+            decay_lr=1e-5,
+        ),
+
+        num_flow_samples=1,
+        weight_loader=weight_loaders.PiBehaviorWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+
+        # 200k step 대신 10k step으로 줄여 1주일 안에 끝나는 실험을 목표로 한다.
+        # 첫 500~1000 step의 step/sec 로그를 보고 너무 느리면 5k로 낮춰도 된다.
+        num_train_steps=10_000,
+        log_interval=50,
+        save_interval=1000,
+        keep_period=2000,
+
+        assets_base_dir="./outputs/assets",
+        checkpoint_base_dir="./outputs/checkpoints",
+
+        # A100 40GB/80GB 모두에서 먼저 시도하기 좋은 보수적인 값.
+        # OOM이 안 나고 GPU utilization이 낮으면 CLI에서 --batch_size=12 또는 16으로 올린다.
+        num_workers=4,
+        batch_size=8,
+
+        wandb_enabled=True,
+        fsdp_devices=1,
+        val_num_batches=2,
+    ),
 ]
 
 # [2026-04-18] A100 smoke 기반 batch_size=8 확인용 짧은 테스트
