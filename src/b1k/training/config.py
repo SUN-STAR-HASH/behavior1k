@@ -9,6 +9,7 @@
 3. 모델 내부 task embedding은 12개만 두고, 전역 task id를 로컬 0~11로 바꿔 넣는다.
 """
 
+import json
 import abc
 from collections.abc import Sequence
 import dataclasses
@@ -41,6 +42,12 @@ from b1k.configs.task_subset import GLOBAL_TO_LOCAL, SELECTED_TASKS
 
 ModelType: TypeAlias = _model.ModelType
 Filter: TypeAlias = nnx.filterlib.Filter
+
+def _load_episode_indices(path: str | None) -> list[int] | None:
+    if not path:
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return [int(x) for x in json.load(f)]
 
 @dataclasses.dataclass(frozen=True)
 class AssetsConfig:
@@ -792,6 +799,10 @@ _CONFIGS = [
 
                 # smoke에서는 per-timestamp normalization은 일단 끔
                 use_per_timestamp_norm=False,
+
+                episodes_index=_load_episode_indices(
+                    "outputs/assets/task_subsets/selected12_episodes.json"
+                ),
             ),
 
             # baseline smoke이므로 action 변환도 단순하게 유지
