@@ -4,6 +4,18 @@
 - OmniGibson/LeRobot 형식의 데이터를 읽는다.
 - OpenPI의 배치/변환 파이프라인을 그대로 재사용한다.
 - 이번 수정에서는 50개 태스크 전체가 아니라 12개 태스크만 걸러서 쓸 수 있게 한다.
+
+비전공자용 큰 그림:
+    "데이터 로더"는 학습할 때 데이터를 한 묶음(batch)씩 꺼내 주는 장치다.
+    모델은 한 번에 샘플 하나만 보는 것이 아니라 여러 샘플을 묶어서 본다.
+    이 파일은 BEHAVIOR-1K 데이터셋에서 이미지, 로봇 상태, 정답 action을 꺼내고,
+    OpenPI가 쓰는 transform들을 지나 모델이 기대하는 모양으로 맞춘다.
+
+    여기서 가장 헷갈리는 부분은 "데이터셋 task id"와 "모델 task id"다.
+    원본 데이터셋은 0~49 global task id를 쓰지만,
+    현재 모델은 선택한 12개 task만 쓰므로 내부 embedding 번호는 0~11 local id다.
+    이 파일은 데이터 자체를 12개 task로 걸러 주고,
+    실제 id 변환은 transforms.TaskIndexToTaskId가 담당한다.
 """
 
 import importlib
@@ -43,7 +55,13 @@ def _filter_to_selected_tasks(dataset, allowed_task_ids, *, strict: bool = False
     대표적으로 많이 쓰는 `hf_dataset` 또는 `dataset` 필드를 우선 시도한다.
     필터를 적용할 수 없는 구조면 경고만 남기고 원본을 그대로 반환한다.
     """
+    # allowed_task_ids는 원본 BEHAVIOR-1K 기준 global task id 목록이다.
+    # 예: [0, 1, 5, 11, ...]
+    # 이 단계에서는 아직 local id로 바꾸지 않는다.
     allowed = set(int(x) for x in allowed_task_ids)
+
+    # BehaviorLeRobotDataset 안에는 실제 Hugging Face dataset이 hf_dataset이라는
+    # 이름으로 들어 있을 때가 많다. 환경/버전에 따라 dataset이라는 이름일 수도 있다.
     base = getattr(dataset, "hf_dataset", None) or getattr(dataset, "dataset", None)
     if base is None or not hasattr(base, "filter"):
         msg = (
@@ -58,6 +76,8 @@ def _filter_to_selected_tasks(dataset, allowed_task_ids, *, strict: bool = False
         return dataset
 
     try:
+        # 각 row의 task_index 또는 task_id를 보고 선택한 12개 태스크만 남긴다.
+        # 데이터셋 schema가 조금씩 다를 수 있어서 두 key를 모두 확인한다.
         filtered = base.filter(lambda ex: int(ex.get("task_index", ex.get("task_id", -1))) in allowed)
         if getattr(dataset, "hf_dataset", None) is not None:
             dataset.hf_dataset = filtered
@@ -102,6 +122,8 @@ class DataLoaderImpl(_openpi_data_loader.DataLoader):
 
     def __iter__(self):
         for batch in self._data_loader:
+            # OpenPI의 TorchDataLoader가 만든 dict batch를 우리 Observation dataclass로 바꾼다.
+            # batch["actions"]는 정답 action sequence이며 train_step에서 loss 계산에 사용된다.
             yield Observation.from_dict(batch), batch["actions"]
 
 # [4/8] 삭제 후보

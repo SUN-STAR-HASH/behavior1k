@@ -5,6 +5,18 @@ OpenPI 기본 변환에 더해,
 - 필요할 때만 timestamp로 stage를 계산하는 변환
 - FAST 보조 토큰을 만드는 변환
 을 추가했다.
+
+비전공자용 큰 그림:
+    transform은 "데이터 모양을 바꾸는 작은 함수"다.
+    학습 데이터는 사람이 보기 편한 이름과 모양으로 저장되어 있지만,
+    모델은 정확히 정해진 key 이름, shape, dtype을 기대한다.
+
+    예:
+        원본: task_index = 46
+        변환 후: tokenized_prompt = [11]
+
+    여기서 tokenized_prompt라는 이름은 OpenPI 코드와 호환하기 위해 쓰지만,
+    이 프로젝트에서는 자연어 문장 토큰이 아니라 task id 숫자를 담는다.
 """
 
 import dataclasses
@@ -51,11 +63,15 @@ class TaskIndexToTaskId(DataTransformFn):
     - 추론 시: 환경이 주는 전역 task id도 같은 방식으로 바꿀 수 있다.
     """
 
-    # Optional task remapping (global/original task id -> local subset task id)
+    # task_mapping은 global/original task id -> local subset task id 변환표다.
+    # 예: {0: 0, 1: 1, 5: 2, ..., 46: 11}
+    # None이면 이미 local id가 들어왔다고 보고 그대로 사용한다.
     task_mapping: dict[int, int] | None = None
     
     def __call__(self, data: DataDict) -> DataDict:
-        # During inference, task_id might be provided directly instead of task_index
+        # 추론에서는 task_index 대신 task_id라는 이름으로 들어올 수 있다.
+        # 이 경로는 "이미 모델에 넣을 id가 준비되어 있다"는 의미로 보고 그대로 쓴다.
+        # 평가 wrapper는 별도로 local id를 넣어 주므로 보통 이 transform은 추론에서 skip된다.
         if "task_id" in data:
             # Direct task_id provided (inference mode)
             task_id = int(data["task_id"])
@@ -63,7 +79,8 @@ class TaskIndexToTaskId(DataTransformFn):
             # task_index provided (training mode)
             task_index = int(data["task_index"])
             
-            # Apply mapping if provided, otherwise use task_index directly as task_id
+            # 학습 데이터는 보통 global task_index를 갖고 있다.
+            # 모델 embedding은 local id를 요구하므로 mapping이 있으면 반드시 변환한다.
             if self.task_mapping is not None:
                 if task_index not in self.task_mapping:
                     raise ValueError(f"task_index {task_index} not found in mapping")
@@ -77,8 +94,12 @@ class TaskIndexToTaskId(DataTransformFn):
                 return data  # Already has tokenized_prompt, skip this transform
             raise ValueError("Either task_index, task_id, or tokenized_prompt is required for PI_BEHAVIOR model")
 
-        # 기본 경로는 stage 토큰을 따로 붙이지 않고
-        # 최종적으로 로컬 task id 하나만 모델에 전달한다.
+        # 기본 경로는 stage 토큰을 따로 붙이지 않는다.
+        # 최종적으로 local task id 하나만 모델에 전달한다.
+        #
+        # shape이 [1]인 이유:
+        #   모델 쪽에서 batch를 만들면 [B, 1]이 된다.
+        #   두 번째 값(stage id)을 붙이면 [B, 2]가 되고 stage conditioning 경로가 열린다.
         prompt_tokens = np.array([task_id], dtype=np.int32)
         prompt_mask = np.array([True], dtype=bool)
 
@@ -92,6 +113,15 @@ class TaskIndexToTaskId(DataTransformFn):
 @dataclasses.dataclass(frozen=True)
 class ComputeSubtaskStateFromMeta(DataTransformFn):
     """timestamp와 episode 길이를 이용해 현재 stage 번호를 계산한다.
+
+    쉬운 설명:
+        하나의 episode는 로봇이 태스크를 시작해서 끝낼 때까지의 전체 영상/행동이다.
+        stage는 그 episode를 여러 구간으로 나눈 번호다.
+        예를 들어 10초짜리 episode를 5개 stage로 나누면,
+        앞 2초는 stage 0, 다음 2초는 stage 1처럼 볼 수 있다.
+
+    현재 12-task baseline에서는 stage conditioning을 기본으로 쓰지 않는다.
+    그래도 나중에 stage loss나 stage-conditioned 모델을 다시 켤 수 있게 코드를 남겨 둔다.
     
     Divides episode into task-specific number of stages based on episode length.
     Requires dataset reference to access episode metadata.

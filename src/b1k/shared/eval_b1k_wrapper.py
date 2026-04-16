@@ -2,6 +2,26 @@
 
 이번 설정은 pi0 + task embedding + flow matching only 경로에 맞춘다.
 기본적으로 stage 추적, 평가용 보정 규칙, 다중 체크포인트는 사용하지 않는다.
+
+비전공자용 큰 그림:
+    이 파일은 "로봇 환경에서 들어온 관측값"과 "모델이 원하는 입력값" 사이의
+    통역기 역할을 한다.
+
+    환경이 주는 값:
+        - 카메라 이미지 3장
+        - 로봇 관절/그리퍼 상태
+        - 원본 BEHAVIOR-1K 기준 task_id
+
+    모델이 원하는 값:
+        - 224x224로 맞춘 이미지
+        - 23차원으로 정리된 로봇 상태
+        - 12개 subset 기준 local task_id
+
+    특히 task_id가 중요하다.
+    체크포인트 선택은 원본 global task_id 기준으로 해야 하지만,
+    모델의 task_embeddings 표는 12칸뿐이라 모델 입력은 local task_id여야 한다.
+    그래서 이 wrapper는 self.task_id(global)와 self.local_task_id(local)를
+    일부러 따로 들고 간다.
 """
 
 import logging
@@ -23,7 +43,20 @@ RESIZE_SIZE = 224
 
 @dataclasses.dataclass
 class B1KWrapperConfig:
-    """B1K 서빙용 최소 wrapper 설정."""
+    """B1K 서빙용 최소 wrapper 설정.
+
+    actions_to_execute:
+        모델은 보통 여러 step의 행동을 한꺼번에 예측한다.
+        그중 실제 환경에 몇 개까지 실행할지 정한다.
+
+    actions_to_keep:
+        rolling inpainting을 쓸 때 이전 예측의 마지막 행동 몇 개를 다음 예측에
+        힌트로 남길지 정한다. 0이면 이전 행동을 이어 붙이지 않는다.
+
+    execute_in_n_steps:
+        action compression을 쓸 때 actions_to_execute개의 행동을 몇 step에
+        압축해서 실행할지 정한다.
+    """
     actions_to_execute: int = 12
     actions_to_keep: int = 0
     execute_in_n_steps: int = 12
@@ -35,7 +68,12 @@ class B1KWrapperConfig:
 
 
 class B1KPolicyWrapper():
-    """B1K policy wrapper for PI_BEHAVIOR models with action compression, rolling inpainting, and stage voting."""
+    """PI_BEHAVIOR 모델을 BEHAVIOR 평가 서버 형식에 맞춰 감싸는 클래스.
+
+    policy 자체는 "이미 전처리된 입력을 받아 action을 예측하는 객체"다.
+    그런데 실제 평가 서버는 원본 카메라 이름, 원본 proprioception 이름,
+    원본 task_id를 보낸다. 이 클래스가 그 차이를 맞춰 준다.
+    """
     
     def __init__(
         self, 
@@ -59,7 +97,15 @@ class B1KPolicyWrapper():
                 f"actions_to_execute + actions_to_keep exceeds action_horizon"
             )
         
-        # PI_BEHAVIOR specific (always True for B1K)
+        # PI_BEHAVIOR specific (always True for B1K).
+        #
+        # self.task_id:
+        #   BEHAVIOR-1K 원본 번호다. 예: 5, 40, 46
+        #   체크포인트 mapping JSON과 correction rule은 이 번호를 기준으로 작성되어 있다.
+        #
+        # self.local_task_id:
+        #   SELECTED_TASKS 안에서 다시 매긴 번호다. 예: global 5 -> local 2
+        #   모델의 task_embeddings는 12행뿐이므로 반드시 이 번호를 넣어야 한다.
         self.task_id = task_id
         self.local_task_id = map_global_to_local(task_id) if task_id is not None else None
         self.current_stage = 0
@@ -85,7 +131,12 @@ class B1KPolicyWrapper():
         logger.info(f"Policy reset - Task ID: {self.task_id}, Action horizon: {self.action_horizon}")
     
     def _handle_task_change(self, new_task_id):
-        """Handle task ID change by switching checkpoint and resetting state."""
+        """환경이 다른 task를 시작했을 때 wrapper 내부 상태를 초기화한다.
+
+        new_task_id는 반드시 원본 global task id다.
+        여기에서 local id를 따로 계산한 뒤, 체크포인트 스위처에는 global id를 넘긴다.
+        이렇게 해야 JSON mapping과 모델 embedding lookup이 서로 섞이지 않는다.
+        """
         if self.task_id != new_task_id:
             old_task_id = self.task_id
             self.task_id = new_task_id
@@ -108,14 +159,20 @@ class B1KPolicyWrapper():
             self.next_initial_actions = None
 
     def process_obs(self, obs: dict) -> dict:
-        """Process observation to match model input format."""
+        """평가 환경의 원본 observation을 모델 입력 이름으로 바꾼다.
+
+        BEHAVIOR 환경은 카메라 이름이 길고 시뮬레이터 내부 경로처럼 생겼다.
+        모델 쪽 transform은 더 짧은 공통 이름을 기대한다.
+        여기서는 이미지 크기와 key 이름만 맞추고, 정규화는 뒤 transform에서 처리한다.
+        """
         prop_state = obs["robot_r1::proprio"]
         
         head_original = obs["robot_r1::robot_r1:zed_link:Camera:0::rgb"][..., :3]
         left_original = obs["robot_r1::robot_r1:left_realsense_link:Camera:0::rgb"][..., :3]
         right_original = obs["robot_r1::robot_r1:right_realsense_link:Camera:0::rgb"][..., :3]
         
-        # Resize images
+        # 모델 backbone은 224x224 이미지를 기준으로 학습되었다.
+        # resize_with_pad는 이미지를 찌그러뜨리지 않도록 비율을 유지하고 빈 공간을 padding한다.
         head_resized = resize_with_pad(head_original, RESIZE_SIZE, RESIZE_SIZE)
         left_resized = resize_with_pad(left_original, RESIZE_SIZE, RESIZE_SIZE)
         right_resized = resize_with_pad(right_original, RESIZE_SIZE, RESIZE_SIZE)
@@ -133,14 +190,20 @@ class B1KPolicyWrapper():
         return
     
     def prepare_batch_for_pi_behavior(self, batch):
-        """모델 입력에 로컬 task id만 추가한다."""
+        """모델 입력에 로컬 task id만 추가한다.
+
+        이 모델은 텍스트 프롬프트를 읽지 않는다.
+        대신 "몇 번째 태스크인지"를 숫자로 넣고, 모델 내부 embedding 표에서
+        해당 태스크 벡터를 꺼내 쓴다.
+        """
         task_id = self.local_task_id if self.local_task_id is not None else -1
         batch_copy = batch.copy()
         if "prompt" in batch_copy:
             del batch_copy["prompt"]
 
-        # PI_BEHAVIOR 기본 경로에서는 텍스트 프롬프트를 쓰지 않고
-        # tokenized_prompt 자리에 "로컬 task id 1개"만 넣어서 task embedding lookup에 사용한다.
+        # PI_BEHAVIOR 기본 경로에서는 텍스트 프롬프트를 쓰지 않는다.
+        # tokenized_prompt라는 이름은 OpenPI 코드 흐름과 맞추기 위해 유지하지만,
+        # 실제 내용은 자연어 토큰이 아니라 local task id 하나다.
         batch_copy["tokenized_prompt"] = np.array([task_id], dtype=np.int32)
         batch_copy["tokenized_prompt_mask"] = np.array([True], dtype=bool)
         return batch_copy
@@ -164,16 +227,17 @@ class B1KPolicyWrapper():
         
         # Extract task_id from observations
         if "task_id" in obs:
-            # 환경은 원래 전역 task id(예: 18)를 줄 수 있다.
-            # 하지만 모델 내부 embedding 표는 12개 subset 기준으로 다시 만들었으므로
-            # 추론 직전에 반드시 로컬 task id(0~11)로 변환해야 한다.
+            # 환경은 원래 전역 task id(예: 5, 40, 46)를 준다.
+            # 여기서는 global id 그대로 상태 변경 함수에 넘긴다.
+            # local id 변환은 _handle_task_change()와 prepare_batch_for_pi_behavior()가 담당한다.
             raw_task_id = int(obs["task_id"][0])
             self._handle_task_change(raw_task_id)
         
         raw_state = obs["robot_r1::proprio"]
         current_state = extract_state_from_proprio(raw_state)
         
-        # Check if we need new actions
+        # 모델 예측은 비싸기 때문에 매 simulator step마다 새로 예측하지 않는다.
+        # last_actions가 없거나, 이미 실행할 만큼 실행했을 때만 새 action chunk를 만든다.
         if self.last_actions is None or self.action_index >= self.config.execute_in_n_steps:
             
             # Process observation
