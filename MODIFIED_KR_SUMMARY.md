@@ -42,9 +42,9 @@
 
 - `python -m compileall -q scripts src`
 
-## 2026-04-16 오늘 반영한 내용
+## 2026-04-16  반영한 내용
 
-오늘은 크게 두 가지를 정리했다.
+ 크게 두 가지를 정리했다.
 
 ### 1. 실행 중 오류가 날 수 있는 부분 수정
 
@@ -100,12 +100,12 @@
   - websocket policy server 실행 흐름을 단계별로 적었다.
   - `--task-id`가 global task id 기준이라는 점을 명확히 했다.
 
-### 오늘 만든 커밋
+### 4/16 만든 커밋
 
 - `ee89c53 Fix task id mapping and checkpoint paths`
 - `1df3670 Add detailed Korean code comments`
 
-### 오늘 확인한 검사
+### 4/16 확인한 검사
 
 - `python -m compileall -q scripts src`
   - Python 문법 컴파일 검사를 통과했다.
