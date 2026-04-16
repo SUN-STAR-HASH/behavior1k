@@ -46,18 +46,32 @@ def _filter_to_selected_tasks(dataset, allowed_task_ids):
     allowed = set(int(x) for x in allowed_task_ids)
     base = getattr(dataset, "hf_dataset", None) or getattr(dataset, "dataset", None)
     if base is None or not hasattr(base, "filter"):
-        logger.warning("subset 필터를 적용할 수 있는 내부 dataset 객체를 찾지 못했다. 원본 데이터셋을 그대로 사용한다.")
+        msg = (
+            "subset 필터를 적용할 수 있는 내부 dataset 객체를 찾지 못했다. "
+            f"type(dataset)={type(dataset)} "
+            f"has_hf_dataset={hasattr(dataset, 'hf_dataset')} "
+            f"has_dataset={hasattr(dataset, 'dataset')}"
+        )
+        if strict:
+            raise RuntimeError(msg)
+        logger.warning(msg)
         return dataset
+
     try:
         filtered = base.filter(lambda ex: int(ex.get("task_index", ex.get("task_id", -1))) in allowed)
         if getattr(dataset, "hf_dataset", None) is not None:
             dataset.hf_dataset = filtered
         elif getattr(dataset, "dataset", None) is not None:
             dataset.dataset = filtered
+
         logger.info("12개 task subset 필터 적용 완료: %s", sorted(allowed))
+        return dataset
     except Exception as exc:
-        logger.warning("subset 필터 적용 중 문제가 생겨 원본 데이터셋을 그대로 사용한다: %s", exc)
-    return dataset
+        msg = f"subset 필터 적용 실패: {exc}"
+        if strict:
+            raise RuntimeError(msg) from exc
+        logger.warning(msg)
+        return dataset
 
 
 # OpenPI 기본 DataLoader는 openpi 쪽 Observation 형식을 기준으로 동작한다.
@@ -378,7 +392,7 @@ def create_behavior_dataset(
                     "observation.images.rgb.right_wrist": right_wrist_rgb,
                     "observation.state": proprio,
                     "action": action,
-                    "task_index": np.int32(idx % 50),
+                    "task_index": np.int32(selected_task_id),
                     "timestamp": np.float32(timestep_in_episode),
                     "episode_index": np.int32(episode_index),
                     "index": np.int64(idx),
@@ -386,7 +400,11 @@ def create_behavior_dataset(
 
         dataset = _LaptopFakeBehaviorDataset()
         if getattr(data_config, 'use_task_subset', False):
-            dataset = _filter_to_selected_tasks(dataset, data_config.allowed_task_ids or SELECTED_TASKS)
+            dataset = _filter_to_selected_tasks(
+                dataset,
+                data_config.allowed_task_ids or SELECTED_TASKS,
+                strict=True,
+            )
         return dataset
 
     # ------------------------------------------------------------------
@@ -469,6 +487,12 @@ def create_behavior_dataset(
         shuffle=True,
         seed=seed,
     )
+
+    if getattr(data_config, "use_task_subset", False):
+        dataset = _filter_to_selected_tasks(
+            dataset,
+            data_config.allowed_task_ids or SELECTED_TASKS,
+        )
 
     if data_config.prompt_from_task:
         dataset = _openpi_data_loader.TransformedDataset(

@@ -25,11 +25,11 @@
 # 실제로 학습/평가에 사용할 12개 태스크의 원래 전역 task id 목록.
 # 이 순서가 로컬 id(0~11)로 매핑되는 순서와 동일하다.
 #
-# 예: SELECTED_TASKS[0] = 0  → 전역 id 0번 태스크 = 로컬 id 0번
-#     SELECTED_TASKS[2] = 3  → 전역 id 3번 태스크 = 로컬 id 2번
+# 예: SELECTED_TASKS[0] = 0   -> 전역 id 0번 = 로컬 id 0번
+#     SELECTED_TASKS[2] = 5   -> 전역 id 5번 = 로컬 id 2번
 #
 # 선택 기준: 데이터 다양성, episode 수, 태스크 복잡도 등을 고려해 선별한 12개.
-SELECTED_TASKS: list[int] = [0, 1, 3, 5, 6, 7, 11, 18, 19, 20, 21, 22]
+SELECTED_TASKS: list[int] = [0, 1, 5, 11, 12, 19, 22, 31, 39, 40, 45, 46]
 
 # 빠른 멤버십 확인을 위한 set 버전.
 # "if task_id in SELECTED_TASKS_SET" 형태로 O(1) 조회에 사용한다.
@@ -42,7 +42,10 @@ SELECTED_TASKS_SET: set[int] = set(SELECTED_TASKS)
 # 전역 task id → 모델 내부 로컬 id (0~11) 변환 딕셔너리.
 # enumerate(SELECTED_TASKS)를 역으로 만들어서 전역 → 로컬 방향으로 조회한다.
 #
-# 예: GLOBAL_TO_LOCAL = {0: 0, 1: 1, 3: 2, 5: 3, 6: 4, 7: 5, 11: 6, 18: 7, ...}
+# 예: GLOBAL_TO_LOCAL = {
+#     0: 0, 1: 1, 5: 2, 11: 3, 12: 4, 19: 5,
+#     22: 6, 31: 7, 39: 8, 40: 9, 45: 10, 46: 11
+# }
 GLOBAL_TO_LOCAL: dict[int, int] = {
     global_id: local_id
     for local_id, global_id in enumerate(SELECTED_TASKS)
@@ -52,7 +55,10 @@ GLOBAL_TO_LOCAL: dict[int, int] = {
 # GLOBAL_TO_LOCAL의 역방향 매핑이다.
 # 추론 결과를 평가 환경에 전달하거나 로그를 남길 때 사용한다.
 #
-# 예: LOCAL_TO_GLOBAL = {0: 0, 1: 1, 2: 3, 3: 5, 4: 6, 5: 7, 6: 11, 7: 18, ...}
+# 예: LOCAL_TO_GLOBAL = {
+#     0: 0, 1: 1, 2: 5, 3: 11, 4: 12, 5: 19,
+#     6: 22, 7: 31, 8: 39, 9: 40, 10: 45, 11: 46
+# }
 LOCAL_TO_GLOBAL: dict[int, int] = {
     local_id: global_id
     for global_id, local_id in GLOBAL_TO_LOCAL.items()
@@ -80,7 +86,7 @@ def map_global_to_local(global_task_id: int) -> int:
             → 데이터 필터링이 제대로 적용되었는지 확인해야 한다.
 
     예:
-        map_global_to_local(5) → 3  (전역 5번 → 로컬 3번)
+        map_global_to_local(5) → 2  (전역 5번 → 로컬 2번)
         map_global_to_local(99) → KeyError 발생
     """
     if global_task_id not in GLOBAL_TO_LOCAL:
@@ -106,7 +112,7 @@ def map_local_to_global(local_task_id: int) -> int:
         KeyError: local_task_id가 0~11 범위를 벗어날 때.
 
     예:
-        map_local_to_global(3) → 5  (로컬 3번 → 전역 5번)
+        map_local_to_global(3) → 11  (로컬 3번 → 전역 11번)
         map_local_to_global(12) → KeyError 발생
     """
     if local_task_id not in LOCAL_TO_GLOBAL:
