@@ -61,6 +61,7 @@ class B1KPolicyWrapper():
         
         # PI_BEHAVIOR specific (always True for B1K)
         self.task_id = task_id
+        self.local_task_id = map_global_to_local(task_id) if task_id is not None else None
         self.current_stage = 0
         self.prediction_history = deque([], maxlen=self.config.history_len)
         
@@ -88,6 +89,7 @@ class B1KPolicyWrapper():
         if self.task_id != new_task_id:
             old_task_id = self.task_id
             self.task_id = new_task_id
+            self.local_task_id = map_global_to_local(new_task_id)
             
             logger.info(f"🔄 Task change detected: {old_task_id} → {new_task_id}")
             
@@ -132,7 +134,7 @@ class B1KPolicyWrapper():
     
     def prepare_batch_for_pi_behavior(self, batch):
         """모델 입력에 로컬 task id만 추가한다."""
-        task_id = self.task_id if self.task_id is not None else -1
+        task_id = self.local_task_id if self.local_task_id is not None else -1
         batch_copy = batch.copy()
         if "prompt" in batch_copy:
             del batch_copy["prompt"]
@@ -166,8 +168,7 @@ class B1KPolicyWrapper():
             # 하지만 모델 내부 embedding 표는 12개 subset 기준으로 다시 만들었으므로
             # 추론 직전에 반드시 로컬 task id(0~11)로 변환해야 한다.
             raw_task_id = int(obs["task_id"][0])
-            new_task_id = map_global_to_local(raw_task_id)
-            self._handle_task_change(new_task_id)
+            self._handle_task_change(raw_task_id)
         
         raw_state = obs["robot_r1::proprio"]
         current_state = extract_state_from_proprio(raw_state)

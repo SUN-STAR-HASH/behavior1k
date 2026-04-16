@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # dataset 구현체마다 내부에 실제 Hugging Face dataset이 들어있는 필드명이 다를 수 있어서
 # hf_dataset / dataset 순서로 찾아본다.
 # 내부 dataset 객체를 찾지 못하면 학습을 아예 깨지 않기 위해 경고만 남기고 원본을 반환한다.
-def _filter_to_selected_tasks(dataset, allowed_task_ids):
+def _filter_to_selected_tasks(dataset, allowed_task_ids, *, strict: bool = False):
     """선택한 태스크만 남기는 간단한 필터.
 
     데이터셋 구현마다 내부 구조가 조금 달라서,
@@ -403,7 +403,6 @@ def create_behavior_dataset(
             dataset = _filter_to_selected_tasks(
                 dataset,
                 data_config.allowed_task_ids or SELECTED_TASKS,
-                strict=True,
             )
         return dataset
 

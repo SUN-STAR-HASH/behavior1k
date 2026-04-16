@@ -7,6 +7,7 @@
 import json
 import logging
 import gc
+import pathlib
 from typing import Any, TYPE_CHECKING
 
 from openpi.policies import policy as _policy
@@ -86,6 +87,8 @@ class CheckpointSwitcher:
                 raise ValueError(f"Checkpoint '{checkpoint_name}' missing 'tasks' field")
             
             checkpoint_path = checkpoint_info["path"]
+            if "://" not in checkpoint_path:
+                checkpoint_path = str(pathlib.Path(checkpoint_path).expanduser())
             tasks = checkpoint_info["tasks"]
             
             # Validate tasks are unique

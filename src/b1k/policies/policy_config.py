@@ -37,7 +37,10 @@ def create_trained_policy(
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint - EXACT COPY from openpi with b1k imports."""
     repack_transforms = repack_transforms or transforms.Group()
-    checkpoint_dir = download.maybe_download(str(checkpoint_dir))
+    checkpoint_uri = str(checkpoint_dir)
+    if "://" not in checkpoint_uri:
+        checkpoint_uri = str(pathlib.Path(checkpoint_uri).expanduser())
+    checkpoint_dir = download.maybe_download(checkpoint_uri)
 
     # Detect PyTorch model
     is_pytorch = (checkpoint_dir / "pytorch_model.safetensors").exists() or (checkpoint_dir / "pytorch_model.pt").exists()
