@@ -510,7 +510,7 @@ def create_behavior_dataset(
         seed=seed,
     )
 
-    if getattr(data_config, "use_task_subset", False) and not data_config.episodes_index:
+    if getattr(data_config, "use_task_subset", False):
         dataset = _filter_to_selected_tasks(
             dataset,
             data_config.allowed_task_ids or SELECTED_TASKS,
