@@ -801,7 +801,7 @@ _CONFIGS = [
                 use_per_timestamp_norm=False,
 
                 episodes_index=_load_episode_indices(
-                    "outputs/assets/task_subsets/selected12_episodes.json"
+                    "outputs/assets/task_subsets/selected12_episodes_parquet_verified.json"
                 ),
             ),
 
