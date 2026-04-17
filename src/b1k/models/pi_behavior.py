@@ -1296,7 +1296,12 @@ class PiBehavior(_model.BaseModel):
         # ── 3. Stage prediction (보조 학습) ────────────────────────────────
         # stage conditioning 경로(tokenized_prompt.shape[1] > 1)에서만 실행된다.
         # 기본 12-task baseline에서는 이 분기가 실행되지 않는다.
-        if observation.tokenized_prompt.shape[1] > 1:
+        has_stage_prompt = (
+            observation.tokenized_prompt is not None
+            and observation.tokenized_prompt.shape[1] > 1
+        )
+
+        if has_stage_prompt:
             # prefix 시퀀스에서 base task 토큰의 출력을 찾는다.
             # first_stage_token_idx: stage 토큰 중 첫 번째(AR=True)의 위치
             # base_task_token_idx: 그 바로 앞이 base task 토큰
