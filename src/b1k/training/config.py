@@ -843,7 +843,7 @@ _CONFIGS = [
         checkpoint_base_dir="./outputs/checkpoints",
 
         # A100이라도 smoke 단계에서는 너무 크게 안 잡고 시작
-        num_workers=2,
+        num_workers=0, # 원래 2, 잠깐 수정
         batch_size=4,
 
         # 필요하면 True로 바꿔도 되지만,
