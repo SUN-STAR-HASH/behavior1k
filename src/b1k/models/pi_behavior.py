@@ -1060,6 +1060,125 @@ class PiBehavior(_model.BaseModel):
 
         return tokens, input_mask, ar_mask, adarms_cond
 
+
+    # [2026-04-17] PiBehavior 정식 sample_actions 추가
+    # 목적:
+    #   OpenPI BaseModel 인터페이스를 만족시키고,
+    #   Pi0와 같은 flow-matching ODE 샘플링 경로를 PiBehavior에서도 사용한다.
+    #
+    # 설계:
+    #   1) observation을 inference용 전처리
+    #   2) prefix를 한 번 forward 해서 KV cache 생성
+    #   3) x_t ~ N(0, I) 에서 시작
+    #   4) t=1 -> 0 방향으로 suffix forward를 반복하며 velocity v_t 예측
+    #   5) x_{t-dt} = x_t + dt * v_t   (dt < 0)
+    #
+    # 참고:
+    #   dt를 음수로 두는 이유는 Pi0 구현과 동일하게
+    #   "noise(1.0) -> clean(0.0)" 방향으로 적분하기 위해서다.
+    @override
+    def sample_actions(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        *,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
+    ) -> _model.Actions:
+        # [2026-04-17]
+        # Pi0의 sample_actions와 동일하게 inference용 observation 전처리를 거친다.
+        # 현재 PiBehavior는 b1k.models.observation 쪽 preprocess_observation을 import하고 있으므로
+        # 여기서는 그 경로를 우선 사용한다.
+        observation = preprocess_observation(observation, train=False)
+
+        # diffusion 관례:
+        #   t=1.0 -> pure noise
+        #   t=0.0 -> target(clean action)
+        dt = -1.0 / num_steps
+        batch_size = observation.state.shape[0]
+
+        if noise is None:
+            noise = jax.random.normal(
+                rng,
+                (batch_size, self.action_horizon, self.action_dim),
+                dtype=jnp.float32,
+            )
+
+        # ---------------------------------------------------------------
+        # 1) prefix forward 1회로 KV cache 생성
+        # ---------------------------------------------------------------
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
+
+        _, kv_cache = self.PaliGemma.llm(
+            [prefix_tokens, None],
+            mask=prefix_attn_mask,
+            positions=prefix_positions,
+        )
+
+        # ---------------------------------------------------------------
+        # 2) reverse ODE loop
+        # ---------------------------------------------------------------
+        def step(carry):
+            x_t, time = carry
+
+            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+                observation,
+                x_t,
+                jnp.broadcast_to(time, batch_size),
+            )
+
+            # suffix 내부 attention mask
+            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+
+            # suffix query가 prefix key/value 전체를 볼 수 있게 하는 mask
+            prefix_to_suffix_mask = einops.repeat(
+                prefix_mask,
+                "b p -> b s p",
+                s=suffix_tokens.shape[1],
+            )
+
+            full_attn_mask = jnp.concatenate(
+                [prefix_to_suffix_mask, suffix_attn_mask],
+                axis=-1,
+            )
+
+            assert full_attn_mask.shape == (
+                batch_size,
+                suffix_tokens.shape[1],
+                prefix_tokens.shape[1] + suffix_tokens.shape[1],
+            )
+
+            suffix_positions = (
+                jnp.sum(prefix_mask, axis=-1)[:, None]
+                + jnp.cumsum(suffix_mask, axis=-1)
+                - 1
+            )
+
+            (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+                [None, suffix_tokens],
+                mask=full_attn_mask,
+                positions=suffix_positions,
+                kv_cache=kv_cache,
+                adarms_cond=[None, adarms_cond],
+            )
+            assert prefix_out is None
+
+            # suffix hidden -> predicted velocity
+            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+            # dt < 0 이므로 x_t + dt * v_t 는 t=1 -> 0 방향 적분
+            return x_t + dt * v_t, time + dt
+
+        def cond(carry):
+            _, time = carry
+            # floating-point 오차에 robust 하게 종료
+            return time >= -dt / 2
+
+        x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
+        return x_0
+
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # 손실 함수
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
