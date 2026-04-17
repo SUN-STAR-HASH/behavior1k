@@ -18,6 +18,8 @@
     실제 id 변환은 transforms.TaskIndexToTaskId가 담당한다.
 """
 
+import json
+from pathlib import Path
 import importlib
 import logging
 import os
@@ -92,6 +94,36 @@ def _filter_to_selected_tasks(dataset, allowed_task_ids, *, strict: bool = False
             raise RuntimeError(msg) from exc
         logger.warning(msg)
         return dataset
+
+
+# [04/17] A100 real-data smoke 수정
+# 후처리로 hf_dataset만 잘라내면 BehaviorLeRobotDataset 내부 query index와 어긋날 수 있어서,
+# real dataset path에서는 처음부터 선택한 12개 task_name만 넘겨 dataset을 생성하도록 바꾼다.
+# tasks.jsonl의 task_index -> task_name 매핑을 읽어서 allowed_task_ids에 해당하는 이름만 뽑는다.
+def _load_selected_task_names(dataset_root: str, allowed_task_ids: list[int] | None = None) -> list[str]:
+    allowed = allowed_task_ids or list(SELECTED_TASKS)
+    tasks_path = Path(dataset_root) / "meta" / "tasks.jsonl"
+
+    rows = []
+    with open(tasks_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+
+    by_index = {int(row["task_index"]): row["task_name"] for row in rows}
+
+    missing = [tid for tid in allowed if tid not in by_index]
+    if missing:
+        raise RuntimeError(f"tasks.jsonl에서 task_index를 찾지 못함: {missing}")
+
+    selected_task_names = [by_index[int(tid)] for tid in allowed]
+
+    logger.info(
+        "[2026-04-17] selected task names loaded from tasks.jsonl: %s",
+        selected_task_names,
+    )
+    return selected_task_names
 
 
 # OpenPI 기본 DataLoader는 openpi 쪽 Observation 형식을 기준으로 동작한다.
@@ -494,29 +526,57 @@ def create_behavior_dataset(
         "freeze_pies",
     ]
 
+        # [2026-04-17] A100 real-data smoke 수정
+    # 기존 방식:
+    #   1) BehaviorLeRobotDataset을 전체 task 목록으로 만든 뒤
+    #   2) episodes=data_config.episodes_index 를 넘기고
+    #   3) _filter_to_selected_tasks()로 후처리 subset 필터를 적용
+    #
+    # 최신 로그에서 위 방식은 filter 완료 후 hf_dataset 크기와 내부 query index가 어긋난 듯한
+    # IndexError를 일으켰다. 따라서 real dataset path에서는
+    # "처음부터 선택한 12개 task_name만 넣어서 dataset을 생성"하도록 바꾼다.
+    #
+    # 참고:
+    # - fake path는 그대로 둔다.
+    # - real path에서는 후처리 _filter_to_selected_tasks()를 더 이상 쓰지 않는다.
+    # - episodes=data_config.episodes_index 도 잠시 제거해서 dataset 내부 인덱스 일관성을 우선 확인한다.
+
+    selected_task_names = tasks
+    if getattr(data_config, "use_task_subset", False):
+        selected_task_names = _load_selected_task_names(
+            data_config.behavior_dataset_root,
+            data_config.allowed_task_ids or SELECTED_TASKS,
+        )
+
     dataset = BehaviorLeRobotDataset(
         repo_id=data_config.repo_id,
         root=data_config.behavior_dataset_root,
-        tasks=tasks,
+        tasks=selected_task_names,
         modalities=["rgb"],
         local_only=True,
         delta_timestamps={
             key: [t / 30.0 for t in range(action_horizon)]
             for key in data_config.action_sequence_keys
         },
-        episodes=data_config.episodes_index,
+        # [2026-04-17] 잠정 비활성화:
+        # raw episode_index 리스트를 그대로 넘기면 내부 episode 해석 방식과 맞지 않을 수 있어
+        # 먼저 task subset만으로 일관되게 dataset이 생성되는지 확인한다.
+        # episodes=data_config.episodes_index,
         chunk_streaming_using_keyframe=False,
         shuffle=True,
         seed=seed,
     )
 
-    if getattr(data_config, "use_task_subset", False):
-        dataset = _filter_to_selected_tasks(
-            dataset,
-            data_config.allowed_task_ids or SELECTED_TASKS,
-            strict=True,
-        )
-
+    # [2026-04-17] real dataset path에서는 후처리 subset 필터 제거
+    # 이유: hf_dataset만 뒤늦게 잘라내면 BehaviorLeRobotDataset 내부 query index 재계산이 안 되어
+    # out-of-range가 날 가능성이 있음.
+    # if getattr(data_config, "use_task_subset", False):
+    #     dataset = _filter_to_selected_tasks(
+    #         dataset,
+    #         data_config.allowed_task_ids or SELECTED_TASKS,
+    #         strict=True,
+    #     )
+    
     if data_config.prompt_from_task:
         dataset = _openpi_data_loader.TransformedDataset(
             dataset,

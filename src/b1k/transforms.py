@@ -81,12 +81,18 @@ class TaskIndexToTaskId(DataTransformFn):
             
             # 학습 데이터는 보통 global task_index를 갖고 있다.
             # 모델 embedding은 local id를 요구하므로 mapping이 있으면 반드시 변환한다.
-            if self.task_mapping is not None:
-                if task_index not in self.task_mapping:
-                    raise ValueError(f"task_index {task_index} not found in mapping")
+            if task_index in self.task_mapping:
                 task_id = self.task_mapping[task_index]
             else:
-                task_id = task_index
+                episode_index = data.get("episode_index", None)
+                sample_index = data.get("index", None)
+                timestamp = data.get("timestamp", None)
+                raise ValueError(
+                    f"task_index {task_index} not found in mapping; "
+                    f"episode_index={episode_index}, index={sample_index}, "
+                    f"timestamp={timestamp}, allowed={sorted(self.task_mapping.keys())}"
+                )
+
         else:
             # During inference, if neither is provided, this transform should be skipped
             # The tokenized_prompt should already be set up correctly
@@ -100,15 +106,10 @@ class TaskIndexToTaskId(DataTransformFn):
         # shape이 [1]인 이유:
         #   모델 쪽에서 batch를 만들면 [B, 1]이 된다.
         #   두 번째 값(stage id)을 붙이면 [B, 2]가 되고 stage conditioning 경로가 열린다.
-        prompt_tokens = np.array([task_id], dtype=np.int32)
-        prompt_mask = np.array([True], dtype=bool)
 
-        return {
-            **data,
-            "tokenized_prompt": prompt_tokens,
-            "tokenized_prompt_mask": prompt_mask
-        }
-
+        data = dict(data)
+        data["task_id"] = task_id
+        return data
 
 @dataclasses.dataclass(frozen=True)
 class ComputeSubtaskStateFromMeta(DataTransformFn):
