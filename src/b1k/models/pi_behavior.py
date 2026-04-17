@@ -1405,4 +1405,17 @@ class PiBehavior(_model.BaseModel):
         losses['flow'] = jnp.mean(jnp.stack(flow_losses, axis=0), axis=0)  # [B, H]
         losses['subtask'] = subtask_logits  # stage logit (나중에 cross-entropy 계산)
 
+        # [2026-04-17] train.py는 losses_dict["total_loss"]를 기대하므로
+        # compute_detailed_loss()에서 최종 loss를 명시적으로 만들어 준다.
+
+        total_loss = losses["flow"]
+
+        if "subtask" in losses:
+            total_loss = total_loss + self.config.subtask_loss_weight * losses["subtask"][..., None]
+
+        if "fast" in losses:
+            total_loss = total_loss + self.config.fast_loss_weight * losses["fast"][..., None]
+
+        losses["total_loss"] = total_loss
+
         return losses
