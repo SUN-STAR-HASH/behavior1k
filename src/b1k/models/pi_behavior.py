@@ -403,13 +403,13 @@ class PiBehavior(_model.BaseModel):
         # train() / eval() 호출로 자동 변경된다.
         self.deterministic = True  # 기본값은 추론 모드(dropout 등 비활성화)
 
-        # [4/9 추가] 디버그 trace 출력용 helper
-        # 환경변수 B1K_DEBUG_TRACE=1 일 때만 shape 로그를 찍어서
-        # 평소 실행에서는 로그가 너무 많아지지 않게 한다.
-        def _debug_trace(self, msg: str):
-            if os.environ.get("B1K_DEBUG_TRACE", "0") == "1":
-                logger.info(f"[TRACE] {msg}")
-        #####################
+    # [4/9 추가] 디버그 trace 출력용 helper
+    # 환경변수 B1K_DEBUG_TRACE=1 일 때만 shape 로그를 찍어서
+    # 평소 실행에서는 로그가 너무 많아지지 않게 한다.
+    def _debug_trace(self, msg: str):
+        if os.environ.get("B1K_DEBUG_TRACE", "0") == "1":
+            logger.info(f"[TRACE] {msg}")
+    #####################
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Stage 인코딩
