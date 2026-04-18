@@ -859,37 +859,41 @@ _CONFIGS = [
 ]
 
 # [2026-04-18] A100 본 실험용 초안
-# 기준:
 # - 현재 실제로 완주한 pi_behavior_b1k_a100_smoke를 기반으로 함
-# - 데이터 경로 / task subset / batch / workers는 검증된 값을 유지
-# - step, lr 스케줄, checkpoint 주기만 장기 학습용으로 조정
+# - norm stats는 smoke에서 이미 검증된 asset 경로를 재사용
 _CONFIGS.append(
     dataclasses.replace(
         next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_smoke"),
         name="pi_behavior_b1k_a100_baseline_draft",
         exp_name="a100_baseline_draft",
+        data=LeRobotB1KDataConfig(
+            repo_id="IliaLarchenko/behavior_224_rgb",
+            assets=AssetsConfig(
+                assets_dir="/home/data/projects/behavior1k/outputs/assets/pi_behavior_b1k_a100_smoke",
+                asset_id="IliaLarchenko/behavior_224_rgb",
+            ),
+        ),
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1000,
             peak_lr=1e-4,
             decay_steps=20_000,
             decay_lr=1e-5,
         ),
+        batch_size=8,
+        num_workers=4,
         num_train_steps=30_000,
         log_interval=100,
         save_interval=1000,
         keep_period=5000,
-        # 안정성 우선 초안:
-        # smoke에서 실제로 통과한 배치/워커를 그대로 유지
-        num_workers=0,
-        batch_size=4,
         wandb_enabled=False,
         overwrite=False,
         resume=False,
     )
 )
 
-# [2026-04-18] 1000-step pilot
-# 본 실험과 완전히 같은 조건에서 num_train_steps만 1000으로 줄임
+# [2026-04-18] 본 실험과 동일 조건의 1000-step pilot
+# - step만 1000으로 줄이고 나머지는 baseline draft와 동일
+# - norm stats도 같은 smoke asset 경로를 재사용
 _CONFIGS.append(
     dataclasses.replace(
         next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_baseline_draft"),
