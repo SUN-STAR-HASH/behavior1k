@@ -858,16 +858,45 @@ _CONFIGS = [
     ),
 ]
 
+# [2026-04-18] A100 smoke 기반 batch_size=8 확인용 짧은 테스트
+_smoke_cfg = next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_smoke")
+
+_CONFIGS.append(
+    dataclasses.replace(
+        _smoke_cfg,
+        name="pi_behavior_b1k_a100_smoke_bs8_check",
+        exp_name="a100_smoke_bs8_check",
+        data=dataclasses.replace(
+            _smoke_cfg.data,
+            assets=AssetsConfig(
+                assets_dir="/home/data/projects/behavior1k/outputs/assets/pi_behavior_b1k_a100_smoke",
+                asset_id="IliaLarchenko/behavior_224_rgb",
+            ),
+        ),
+        batch_size=8,          # smoke(4) -> 8로만 증가
+        num_workers=2,         # 일단 smoke와 동일 유지
+        num_train_steps=100,   # 짧게 확인용
+        log_interval=10,
+        save_interval=100,
+        keep_period=200,
+        wandb_enabled=False,
+        overwrite=False,
+        resume=False,
+    )
+)
+
 # [2026-04-18] A100 본 실험용 초안
 # - 현재 실제로 완주한 pi_behavior_b1k_a100_smoke를 기반으로 함
 # - norm stats는 smoke에서 이미 검증된 asset 경로를 재사용
+_smoke_cfg = next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_smoke")
+
 _CONFIGS.append(
     dataclasses.replace(
-        next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_smoke"),
+        _smoke_cfg,
         name="pi_behavior_b1k_a100_baseline_draft",
         exp_name="a100_baseline_draft",
-        data=LeRobotB1KDataConfig(
-            repo_id="IliaLarchenko/behavior_224_rgb",
+        data=dataclasses.replace(
+            _smoke_cfg.data,
             assets=AssetsConfig(
                 assets_dir="/home/data/projects/behavior1k/outputs/assets/pi_behavior_b1k_a100_smoke",
                 asset_id="IliaLarchenko/behavior_224_rgb",
@@ -894,9 +923,11 @@ _CONFIGS.append(
 # [2026-04-18] 본 실험과 동일 조건의 1000-step pilot
 # - step만 1000으로 줄이고 나머지는 baseline draft와 동일
 # - norm stats도 같은 smoke asset 경로를 재사용
+_baseline_cfg = next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_baseline_draft")
+
 _CONFIGS.append(
     dataclasses.replace(
-        next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_baseline_draft"),
+        _baseline_cfg,
         name="pi_behavior_b1k_a100_baseline_1000pilot",
         exp_name="a100_baseline_1000pilot",
         num_train_steps=1000,
