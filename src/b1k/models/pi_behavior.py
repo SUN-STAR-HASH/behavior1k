@@ -1408,14 +1408,56 @@ class PiBehavior(_model.BaseModel):
         # [2026-04-17] train.py는 losses_dict["total_loss"]를 기대하므로
         # compute_detailed_loss()에서 최종 loss를 명시적으로 만들어 준다.
 
+        # [2026-04-18 수정]
+        # flow loss는 경우에 따라 [B, H] 또는 [B]로 들어올 수 있다.
+        # 그런데 아래 보조 loss(subtask, fast)는 최종적으로 [B, 1] 형태로 더하고 있어서,
+        # flow가 [B]인 상태로 바로 더하면 broadcasting이 의도와 다르게 꼬일 수 있다.
+        # 그래서 total_loss를 먼저 최소 [B, 1] 형태로 맞춘 뒤 aux loss를 더하도록 수정한다.
+
         total_loss = losses["flow"]
 
-        if "subtask" in losses:
-            total_loss = total_loss + self.config.subtask_loss_weight * losses["subtask"][..., None]
+        # flow loss가 [B]이면 [B, 1]로 바꿔서
+        # subtask/fast loss([B, 1])와 안전하게 더할 수 있게 맞춘다.
+        if total_loss.ndim == 1:
+            total_loss = total_loss[:, None]
 
-        if "fast" in losses:
-            total_loss = total_loss + self.config.fast_loss_weight * losses["fast"][..., None]
+        if self.config.subtask_loss_weight > 0 and "subtask" in losses:
+            subtask_loss = losses["subtask"]
 
+            # subtask loss가 [B, ...] 형태면
+            # 배치축(B)을 제외한 나머지 축을 평균내서 [B]로 정리한다.
+            if subtask_loss.ndim > 1:
+                subtask_loss = jnp.mean(
+                    subtask_loss,
+                    axis=tuple(range(1, subtask_loss.ndim)),
+                )
+
+            # [B] -> [B, 1]
+            # flow loss의 horizon 축 전체에 같은 subtask penalty를 더하기 위한 형태
+            subtask_loss = subtask_loss[:, None]
+
+            total_loss = total_loss + self.config.subtask_loss_weight * subtask_loss
+
+        if self.config.fast_loss_weight > 0 and "fast" in losses:
+            fast_loss = losses["fast"]
+
+            # fast loss도 [B, ...] 형태일 수 있으므로
+            # 배치축만 남기고 평균내서 [B]로 정리한다.
+            if fast_loss.ndim > 1:
+                fast_loss = jnp.mean(
+                    fast_loss,
+                    axis=tuple(range(1, fast_loss.ndim)),
+                )
+
+            # [B] -> [B, 1]
+            # flow loss와 shape을 맞춰 안전하게 더한다.
+            fast_loss = fast_loss[:, None]
+
+            total_loss = total_loss + self.config.fast_loss_weight * fast_loss
+
+        # 최종 total_loss shape:
+        # - 원래 flow가 [B, H]였다면 [B, H]
+        # - 원래 flow가 [B]였다면 [B, 1]
         losses["total_loss"] = total_loss
 
         return losses
