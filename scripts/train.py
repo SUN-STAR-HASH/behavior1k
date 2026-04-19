@@ -91,9 +91,23 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
     if log_code:
         wandb.run.log_code(epath.Path(__file__).parent.parent)
 
-# [4/9 추가]
+# [2026-04-19 수정]
+# 목적:
+# - 기존에는 "현재 시점의 GPU 메모리"만 찍었음
+# - 이제는 실행 중 관측된 최대값(peak_seen)도 같이 기록해서
+#   bs16 테스트에서 어느 구간이 가장 위험한지 바로 확인하려는 용도
+_GPU_MEM_PEAK_MIB = 0
+
+def reset_gpu_mem_peak():
+    """[2026-04-19 수정] peak 추적값을 새 구간 시작 전에 초기화한다."""
+    global _GPU_MEM_PEAK_MIB
+    _GPU_MEM_PEAK_MIB = 0
+
 def log_gpu_mem(tag: str):
-    """현재 GPU 메모리 사용량을 로그로 찍는다."""
+    """[2026-04-19 수정]
+    현재 GPU 메모리 사용량과 지금까지 관측한 최대 사용량(peak_seen)을 함께 로그로 찍는다.
+    """
+    global _GPU_MEM_PEAK_MIB
     try:
         out = subprocess.check_output(
             [
@@ -103,14 +117,19 @@ def log_gpu_mem(tag: str):
             ],
             text=True,
         ).strip().splitlines()[0]
+
         used, total = [int(x.strip()) for x in out.split(",")]
-        logging.info(f"[GPU MEM] {tag}: {used} MiB / {total} MiB")
+        _GPU_MEM_PEAK_MIB = max(_GPU_MEM_PEAK_MIB, used)
+
+        logging.info(
+            f"[GPU MEM] {tag}: {used} MiB / {total} MiB "
+            f"(peak_seen={_GPU_MEM_PEAK_MIB} MiB)"
+        )
     except Exception as e:
         logging.info(f"[GPU MEM] {tag}: unavailable ({e})")
-#############################
 
 def block_and_log(tag: str, x=None):
-    """JAX 계산을 끝까지 block한 뒤 GPU 메모리 로그를 찍는다."""
+    """기존과 동일하게 JAX 계산을 끝까지 block한 뒤 GPU 메모리 로그를 찍는다."""
     if x is not None:
         jax.block_until_ready(x)
     log_gpu_mem(tag)
@@ -463,19 +482,29 @@ def main(config: _config.TrainConfig):
         donate_argnums=(1,),
     )
 
-    # [4/9 추가]
+    # [2026-04-19 수정]
+    # 목적:
+    # - 첫 ptrain_step은 보통 compile + 실제 첫 forward/backward가 겹쳐서 메모리 피크가 크게 나타날 수 있음
+    # - 그래서 이 구간만 따로 peak를 초기화하고, 끝난 직후 peak를 요약 출력
+    reset_gpu_mem_peak()
     log_gpu_mem("before first ptrain_step")
 
     try:
         train_state, info = ptrain_step(train_rng, train_state, batch)
         block_and_log("after first ptrain_step", info["loss"])
+        logging.info(f"[GPU MEM] first ptrain_step peak={_GPU_MEM_PEAK_MIB} MiB")
         logging.info(f"[TRACE] first step loss={float(jax.device_get(info['loss'])):.6f}")
     except Exception:
         logging.exception("[TRACE] failed during first ptrain_step")
         raise
-    ################
 
     start_step = int(train_state.step)
+
+    # [2026-04-19 수정]
+    # 목적:
+    # - 첫 ptrain_step peak와, 이후 train loop 전체 peak를 분리해서 보기 위함
+    reset_gpu_mem_peak()
+
     pbar = tqdm.tqdm(
         range(start_step, config.num_train_steps),
         initial=start_step,
@@ -487,6 +516,13 @@ def main(config: _config.TrainConfig):
     for step in pbar:
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
+        
+        # [2026-04-19 수정]
+        # 목적:
+        # - 각 step 직후 메모리 사용량을 남겨서
+        #   bs16에서 특정 step부터 급격히 증가하는지 확인
+        block_and_log(f"step {step}", info["loss"])
+
         infos.append(info)
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
@@ -510,6 +546,10 @@ def main(config: _config.TrainConfig):
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()
 
+    # [2026-04-19 수정]
+    # 목적:
+    # - 전체 train loop에서 관측된 최대 GPU 메모리를 마지막에 한 번 더 요약
+    logging.info(f"[GPU MEM] max observed during train loop: {_GPU_MEM_PEAK_MIB} MiB")
 
 if __name__ == "__main__":
     main(_config.cli())

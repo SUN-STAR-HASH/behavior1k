@@ -864,8 +864,8 @@ _smoke_cfg = next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_smoke")
 _CONFIGS.append(
     dataclasses.replace(
         _smoke_cfg,
-        name="pi_behavior_b1k_a100_smoke_bs8_check",
-        exp_name="a100_smoke_bs8_check",
+        name="pi_behavior_b1k_a100_smoke_bs16_check",
+        exp_name="a100_smoke_bs16_check",
         data=dataclasses.replace(
             _smoke_cfg.data,
             assets=AssetsConfig(
@@ -873,12 +873,12 @@ _CONFIGS.append(
                 asset_id="IliaLarchenko/behavior_224_rgb",
             ),
         ),
-        batch_size=8,          # smoke(4) -> 8로만 증가
-        num_workers=2,         # 일단 smoke와 동일 유지
-        num_train_steps=100,   # 짧게 확인용
-        log_interval=10,
-        save_interval=100,
-        keep_period=200,
+        batch_size=16,         # bs8 -> bs16
+        num_workers=2,         # 일단 동일 유지
+        num_train_steps=10,    # 메모리/OOM 확인용이라 짧게
+        log_interval=1,        # 매 step 로그
+        save_interval=999999,  # 체크포인트 오버헤드 제거
+        keep_period=999999,
         wandb_enabled=False,
         overwrite=False,
         resume=False,
