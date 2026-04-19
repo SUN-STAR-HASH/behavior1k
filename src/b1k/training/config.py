@@ -861,11 +861,18 @@ _CONFIGS = [
 # [2026-04-18] A100 smoke 기반 batch_size=8 확인용 짧은 테스트
 _smoke_cfg = next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_smoke")
 
+# [2026-04-19 수정]
+# 목적:
+# - bs16은 성공했고 bs32는 OOM이었으므로, 그 중간값인 bs20이 안정적으로 도는지 확인
+# - 이번 run은 학습 성능보다 OOM 여부 / 짧은 구간 안정성 확인이 목적
+# 설정 이유:
+# - num_train_steps=20으로 짧게 두어 위험도를 낮춤
+# - save_interval을 크게 두어 checkpoint 저장 오버헤드 없이 순수 학습 생존만 확인
 _CONFIGS.append(
     dataclasses.replace(
         _smoke_cfg,
-        name="pi_behavior_b1k_a100_smoke_bs16_check",
-        exp_name="a100_smoke_bs16_check",
+        name="pi_behavior_b1k_a100_smoke_bs28_w8_check",
+        exp_name="a100_smoke_bs28_w8_check",
         data=dataclasses.replace(
             _smoke_cfg.data,
             assets=AssetsConfig(
@@ -873,19 +880,19 @@ _CONFIGS.append(
                 asset_id="IliaLarchenko/behavior_224_rgb",
             ),
         ),
-        batch_size=16,         # bs8 -> bs16
-        num_workers=2,         # 일단 동일 유지
-        num_train_steps=10,    # 메모리/OOM 확인용이라 짧게
-        log_interval=1,        # 매 step 로그
-        save_interval=999999,  # 체크포인트 오버헤드 제거
-        keep_period=999999,
+        batch_size=28,
+        num_workers=8,
+        num_train_steps=20,
+        log_interval=1,
+        save_interval=1000,
+        keep_period=1000,
         wandb_enabled=False,
         overwrite=False,
         resume=False,
     )
 )
 
-# [2026-04-18] A100 본 실험용 초안
+# [2026-04-19] A100 본 실험용 초안
 # - 현재 실제로 완주한 pi_behavior_b1k_a100_smoke를 기반으로 함
 # - norm stats는 smoke에서 이미 검증된 asset 경로를 재사용
 _smoke_cfg = next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_smoke")
@@ -908,8 +915,8 @@ _CONFIGS.append(
             decay_steps=20_000,
             decay_lr=1e-5,
         ),
-        batch_size=8,
-        num_workers=4,
+        batch_size=28,   # [2026-04-19 수정] bs8 -> bs28
+        num_workers=6,   # [2026-04-19 수정] w4 -> w6
         num_train_steps=30_000,
         log_interval=100,
         save_interval=1000,
@@ -920,9 +927,9 @@ _CONFIGS.append(
     )
 )
 
-# [2026-04-18] 본 실험과 동일 조건의 1000-step pilot
+# [2026-04-19 수정] 본 실험과 동일 조건의 1000-step pilot
 # - step만 1000으로 줄이고 나머지는 baseline draft와 동일
-# - norm stats도 같은 smoke asset 경로를 재사용
+# - bs28, w6 조건을 그대로 재사용
 _baseline_cfg = next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_baseline_draft")
 
 _CONFIGS.append(
