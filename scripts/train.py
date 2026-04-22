@@ -92,17 +92,19 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
     if log_code:
         wandb.run.log_code(epath.Path(__file__).parent.parent)
 
-# [2026-04-22 추가]
+# [2026-04-22 수정]
 # 설명:
-# - baseline / 비교실험용으로 W&B에는 scalar metric만 최소 로깅
-# - 이미지 / 비디오 / histogram / artifact 업로드는 하지 않음
-# - reduced_info 전체를 그대로 올리지 않고, 필요한 키만 골라서 올리기 위함
+# - baseline / 비교실험용으로 W&B에 필요한 scalar metric만 최소 로깅
+# - action_loss, subtask_loss, learning_rate, step, GPU peak까지 포함
+# - 없는 키는 자동으로 건너뜀
 
 def build_minimal_wandb_payload(
     reduced_info: dict[str, Any],
     *,
+    step: int | None = None,
     step_time_sec: float | None = None,
-    gpu_mem_mib: float | None = None,
+    gpu_mem_peak_mib: float | None = None,
+    learning_rate: float | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {}
 
@@ -111,9 +113,9 @@ def build_minimal_wandb_payload(
         "total_loss",
         "action_loss",
         "subtask_loss",
-        "subtask_accuracy",
         "grad_norm",
         "param_norm",
+        "subtask_accuracy",
         "grad_norm_vlm",
         "grad_norm_action_expert",
     ]
@@ -122,11 +124,17 @@ def build_minimal_wandb_payload(
         if key in reduced_info:
             payload[key] = reduced_info[key]
 
-    if step_time_sec is not None:
-        payload["step_time_sec"] = step_time_sec
+    if step is not None:
+        payload["step"] = int(step)
 
-    if gpu_mem_mib is not None:
-        payload["gpu_mem_mib"] = gpu_mem_mib
+    if step_time_sec is not None:
+        payload["step_time"] = float(step_time_sec)
+
+    if gpu_mem_peak_mib is not None:
+        payload["gpu_mem_peak_mib"] = float(gpu_mem_peak_mib)
+
+    if learning_rate is not None:
+        payload["learning_rate"] = float(learning_rate)
 
     return payload
 
@@ -568,10 +576,26 @@ def main(config: _config.TrainConfig):
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
+            current_lr = float(config.lr_schedule(step))
             
             # Create a concise console log with main metrics
-            main_metrics = {k: v for k, v in reduced_info.items() 
-                          if "loss" in k or "accuracy" in k or k in ["grad_norm", "param_norm", "grad_norm_vlm", "grad_norm_action_expert"]}
+            main_metrics = {
+                k: v for k, v in reduced_info.items()
+                if k in [
+                    "loss",
+                    "total_loss",
+                    "action_loss",
+                    "subtask_loss",
+                    "subtask_accuracy",
+                    "grad_norm",
+                    "param_norm",
+                    "grad_norm_vlm",
+                    "grad_norm_action_expert",
+                ]
+            }
+            main_metrics["learning_rate"] = current_lr
+            main_metrics["step_time"] = step_time_sec
+            main_metrics["gpu_mem_peak_mib"] = _GPU_MEM_PEAK_MIB
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in main_metrics.items())
             pbar.write(f"Step {step}: {info_str}")
             
