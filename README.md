@@ -1,4 +1,4 @@
-  # BEHAVIOR-1K OpenPI Solution
+  # BEHAVIOR-1K Solution
 
   이 저장소는 OpenPI 기반의 BEHAVIOR-1K 정책 학습 및 평가 파이프라인입니다.
 
