@@ -525,6 +525,9 @@ def main(config: _config.TrainConfig):
         in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
         out_shardings=(train_state_sharding, replicated_sharding),
         donate_argnums=(1,),
+        # [2026-04-22 추가]
+        # lr schedule config 객체 -> 실제 callable schedule 함수
+        lr_fn = config.lr_schedule.create()
     )
 
     # [2026-04-19 수정]
@@ -576,7 +579,7 @@ def main(config: _config.TrainConfig):
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
-            current_lr = float(config.lr_schedule(step))
+            current_lr = float(lr_fn(step))
             
             # Create a concise console log with main metrics
             main_metrics = {
