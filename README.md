@@ -82,7 +82,7 @@
 
   <behavior_dataset_root>/data/task-*/episode_*.parquet
 
-  ## 전처리
+  # 전처리
 
   학습 전에 normalization stats가 필요합니다.
 
@@ -101,7 +101,7 @@
 
   outputs/assets/pi_behavior_b1k_fast/IliaLarchenko/behavior_224_rgb/
 
-  ## 학습
+  # 학습
 
   단일 GPU 예시:
 
@@ -156,7 +156,7 @@
 
   mapping 파일은 0부터 49까지 모든 task id를 포함해야 합니다.
 
-  ## 평가
+  # 평가
 
   policy server를 먼저 실행한 뒤, 다른 터미널에서 BEHAVIOR-1K evaluation을 실행
   합니다.
@@ -194,7 +194,7 @@
     향을 많이 받습니다. 환경 문제는 먼저 공식 BEHAVIOR-1K quickstart가 동작하는
     지 확인하는 것이 좋습니다.
 
-  ## References
+  # References
 
   - BEHAVIOR-1K: https://github.com/StanfordVL/BEHAVIOR-1K
   - BEHAVIOR Challenge: https://behavior.stanford.edu/challenge/
