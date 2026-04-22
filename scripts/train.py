@@ -520,6 +520,8 @@ def main(config: _config.TrainConfig):
             logging.info("Reloaded correlation matrix after checkpoint restore")
             train_state = dataclasses.replace(train_state, model_def=nnx.graphdef(model))
 
+    lr_fn = config.lr_schedule.create()
+
     ptrain_step = jax.jit(
         functools.partial(train_step, config),
         in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
@@ -527,7 +529,6 @@ def main(config: _config.TrainConfig):
         donate_argnums=(1,),
         # [2026-04-22 추가]
         # lr schedule config 객체 -> 실제 callable schedule 함수
-        lr_fn = config.lr_schedule.create()
     )
 
     # [2026-04-19 수정]
@@ -568,6 +569,7 @@ def main(config: _config.TrainConfig):
             train_state, info = ptrain_step(train_rng, train_state, batch)
 
         step_time_sec = time.time() - step_start_time
+        infos.append(info)
         
         # [2026-04-19 수정]
         # 목적:
@@ -575,7 +577,6 @@ def main(config: _config.TrainConfig):
         #   bs16에서 특정 step부터 급격히 증가하는지 확인
         block_and_log(f"step {step}", info["loss"])
 
-        infos.append(info)
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
@@ -599,7 +600,12 @@ def main(config: _config.TrainConfig):
             main_metrics["learning_rate"] = current_lr
             main_metrics["step_time"] = step_time_sec
             main_metrics["gpu_mem_peak_mib"] = _GPU_MEM_PEAK_MIB
-            info_str = ", ".join(f"{k}={v:.4f}" for k, v in main_metrics.items())
+            def _fmt_metric(v):
+                if isinstance(v, (float, int)):
+                    return f"{v:.8g}"
+                return str(v)
+
+            info_str = ", ".join(f"{k}={_fmt_metric(v)}" for k, v in main_metrics.items())
             pbar.write(f"Step {step}: {info_str}")
             
             if config.wandb_enabled:
@@ -609,9 +615,12 @@ def main(config: _config.TrainConfig):
                 # - reduced_info 전체 업로드 대신 필요한 항목만 선별
                 wandb_payload = build_minimal_wandb_payload(
                     reduced_info,
+                    step=step,
                     step_time_sec=step_time_sec,
-                    gpu_mem_mib=_GPU_MEM_PEAK_MIB,  # 현재 step에서 관측된 GPU 메모리 피크값
+                    gpu_mem_peak_mib=_GPU_MEM_PEAK_MIB,  # 현재 step에서 관측된 GPU 메모리 피크값
+                    learning_rate=current_lr,
                 )
+                logging.info(f"[W&B PAYLOAD] step={step} payload_keys={list(wandb_payload.keys())} payload={wandb_payload}")
                 wandb.log(wandb_payload, step=step)
             infos = []
         batch = next(data_iter)
