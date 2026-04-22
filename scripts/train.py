@@ -50,6 +50,7 @@ from b1k.models.pi_behavior_config import PiBehaviorConfig
 from b1k.models.observation import Observation
 
 
+
 def init_logging():
     """Custom logging format for better readability."""
     level_mapping = {"DEBUG": "D", "INFO": "I", "WARNING": "W", "ERROR": "E", "CRITICAL": "C"}
@@ -90,6 +91,44 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
 
     if log_code:
         wandb.run.log_code(epath.Path(__file__).parent.parent)
+
+# [2026-04-22 추가]
+# 설명:
+# - baseline / 비교실험용으로 W&B에는 scalar metric만 최소 로깅
+# - 이미지 / 비디오 / histogram / artifact 업로드는 하지 않음
+# - reduced_info 전체를 그대로 올리지 않고, 필요한 키만 골라서 올리기 위함
+
+def build_minimal_wandb_payload(
+    reduced_info: dict[str, Any],
+    *,
+    step_time_sec: float | None = None,
+    gpu_mem_mib: float | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+
+    keep_keys = [
+        "loss",
+        "total_loss",
+        "action_loss",
+        "subtask_loss",
+        "subtask_accuracy",
+        "grad_norm",
+        "param_norm",
+        "grad_norm_vlm",
+        "grad_norm_action_expert",
+    ]
+
+    for key in keep_keys:
+        if key in reduced_info:
+            payload[key] = reduced_info[key]
+
+    if step_time_sec is not None:
+        payload["step_time_sec"] = step_time_sec
+
+    if gpu_mem_mib is not None:
+        payload["gpu_mem_mib"] = gpu_mem_mib
+
+    return payload
 
 # [2026-04-19 수정]
 # 목적:
@@ -425,16 +464,14 @@ def main(config: _config.TrainConfig):
 
     log_gpu_mem("after first batch")
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
+    
     ###############################
-
-    # [4/8] 나중에 smoke patch 위해 수정
-    # Log images from first batch to sanity check.
+    # [2026-04-22 수정]
+    # 설명:
+    # - baseline 장기 학습에서는 첫 batch 이미지 업로드를 끔
+    # - W&B는 숫자(metric)만 남기고, 이미지 로깅 오버헤드는 피하기 위함
     if config.wandb_enabled:
-        images_to_log = [
-            wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-            for i in range(min(5, len(next(iter(batch[0].images.values())))))
-        ]
-        wandb.log({"camera_views": images_to_log}, step=0)
+        logging.info("W&B image logging is disabled for baseline/minimal tracking.")
     ###################################
 
     # Get norm_stats for correlation matrix loading
@@ -514,8 +551,12 @@ def main(config: _config.TrainConfig):
 
     infos = []
     for step in pbar:
+        step_start_time = time.time()
+
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
+
+        step_time_sec = time.time() - step_start_time
         
         # [2026-04-19 수정]
         # 목적:
@@ -535,8 +576,16 @@ def main(config: _config.TrainConfig):
             pbar.write(f"Step {step}: {info_str}")
             
             if config.wandb_enabled:
-                wandb.log(reduced_info, step=step)
-
+                # [2026-04-22 수정]
+                # 설명:
+                # - W&B에는 비교실험에 필요한 최소 scalar만 기록
+                # - reduced_info 전체 업로드 대신 필요한 항목만 선별
+                wandb_payload = build_minimal_wandb_payload(
+                    reduced_info,
+                    step_time_sec=step_time_sec,
+                    gpu_mem_mib=_GPU_MEM_PEAK_MIB,  # 현재 step에서 관측된 GPU 메모리 피크값
+                )
+                wandb.log(wandb_payload, step=step)
             infos = []
         batch = next(data_iter)
 
