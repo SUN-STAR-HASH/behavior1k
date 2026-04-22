@@ -1,83 +1,80 @@
-  # BEHAVIOR-1K OpenPI Solution
+   # BEHAVIOR-1K OpenPI Solution
 
-  This repository contains a BEHAVIOR-1K policy training and evaluation pipeline
-  built on top of OpenPI. It includes a custom `PiBehavior` model, BEHAVIOR-1K
-  data processing, normalization utilities, FAST tokenizer training, checkpoint
-  loading, and a websocket policy server for OmniGibson evaluation.
+  이 저장소는 OpenPI 기반의 BEHAVIOR-1K 정책 학습 및 평가 파이프라인입니다.
+  BEHAVIOR-1K Challenge 환경에서 사용할 수 있는 커스텀 `PiBehavior` 모델, 데이터
+  전처리, normalization 통계 계산, FAST tokenizer 학습, checkpoint 로딩,
+  OmniGibson 평가용 websocket policy server를 포함합니다.
 
-  The code is tailored for the BEHAVIOR-1K Challenge setup with RGB
-  observations, proprioception, task-conditioned policy inference, and optional
-  task-specific checkpoint switching.
+  RGB 관측, proprioception, task id 기반 조건부 policy inference, task별
+  checkpoint switching을 지원합니다.
 
-  ## Overview
+  ## 개요
 
-  The main model configuration is `pi_behavior_b1k_fast`.
+  기본 모델 설정 이름은 `pi_behavior_b1k_fast`입니다.
 
-  Key components:
+  주요 특징은 다음과 같습니다.
 
-  - OpenPI-based VLA policy adapted for BEHAVIOR-1K
-  - Task-id conditioning instead of natural-language prompts
-  - 3-view RGB input and robot proprioception
-  - Delta action training with per-timestamp normalization
-  - Correlated-noise flow matching using dataset action statistics
-  - FAST auxiliary action-token prediction
-  - Subtask/stage prediction auxiliary loss
-  - Evaluation wrapper with rolling inpainting, stage voting, action
-  interpolation, and correction rules
-  - Optional checkpoint switching by BEHAVIOR task id
+  - OpenPI 기반 VLA policy를 BEHAVIOR-1K에 맞게 수정
+  - 자연어 prompt 대신 task id 기반 conditioning 사용
+  - 3-view RGB 이미지와 robot proprioception 사용
+  - delta action 학습 및 per-timestamp normalization 적용
+  - action correlation statistics 기반 correlated-noise flow matching 지원
+  - FAST auxiliary action-token prediction 지원
+  - subtask/stage prediction auxiliary loss 지원
+  - rolling inpainting, stage voting, action interpolation, correction rule을 포
+  함한 평가 wrapper 제공
+  - BEHAVIOR task id별 checkpoint switching 지원
 
-  ## Repository Structure
+  ## 저장소 구조
 
   ```text
   src/b1k/
-    models/          PiBehavior model and model configs
-    training/        training configs, dataloaders, checkpoints, weight loaders
-    policies/        policy creation, checkpoint switching, inference policy
-  wrappers
-    shared/          normalization, eval wrapper, correction rules
+    models/          PiBehavior 모델 및 모델 설정
+    training/        학습 설정, dataloader, checkpoint, weight loader
+    policies/        policy 생성, checkpoint switching, inference wrapper
+    shared/          normalization, eval wrapper, correction rule
 
   scripts/
-    compute_norm_stats.py      compute normalization and action correlation
-  stats
-    train_fast_tokenizer.py    train FAST tokenizer for action chunks
-    train.py                   train PiBehavior policies
-    serve_b1k.py               serve policy over websocket for evaluation
+    compute_norm_stats.py      normalization 및 action correlation 통계 계산
+    train_fast_tokenizer.py    action chunk용 FAST tokenizer 학습
+    train.py                   PiBehavior policy 학습
+    serve_b1k.py               평가용 websocket policy server 실행
 
-  BEHAVIOR-1K/       official BEHAVIOR-1K / OmniGibson code
+  BEHAVIOR-1K/       공식 BEHAVIOR-1K / OmniGibson 코드
   openpi/            OpenPI dependency
 
-  ## Installation
+  ## 설치
 
-  Recommended environment:
+  권장 환경은 다음과 같습니다.
 
   - Linux
   - Python 3.11
   - CUDA 12.x
   - NVIDIA GPU
 
-  Clone the repository with submodules:
+  submodule과 함께 저장소를 clone합니다.
 
   git clone --recurse-submodules https://github.com/SUN-STAR-HASH/behavior1k.git
   cd behavior1k
 
-  Run the setup script:
+  설치 스크립트를 실행합니다.
 
   bash setup_remote.sh
 
-  The setup script installs system dependencies, uv, OpenPI, this package, and
-  the BEHAVIOR-1K / OmniGibson evaluation dependencies.
+  setup_remote.sh는 system dependency, uv, OpenPI, 현재 패키지, BEHAVIOR-1K /
+  OmniGibson 평가 dependency를 설치합니다.
 
-  If submodules are missing, initialize them manually:
+  submodule이 비어 있다면 다음 명령을 실행합니다.
 
   git submodule update --init --recursive
 
-  ## Dataset
+  ## 데이터셋
 
-  The default config uses the resized RGB dataset:
+  기본 config는 resized RGB 데이터셋을 사용합니다.
 
   IliaLarchenko/behavior_224_rgb
 
-  Download it with:
+  데이터셋 다운로드 예시입니다.
 
   uv run huggingface-cli login
 
@@ -92,84 +89,61 @@
   )
   PY
 
-  The dataloader expects parquet episodes under:
+  dataloader는 아래 구조의 parquet episode 파일을 기대합니다.
 
   <data_root>/data/task-*/episode_*.parquet
 
-  Update paths in src/b1k/training/config.py if needed:
+  필요하면 src/b1k/training/config.py에서 경로를 수정합니다.
 
   behavior_dataset_root="./data/behavior_224_rgb"
   assets_base_dir="./outputs/assets"
   checkpoint_base_dir="./outputs/checkpoints"
 
-  ## Preprocessing
+  ## 전처리
 
-  Compute normalization statistics before training:
+  학습 전에 normalization statistics를 계산해야 합니다.
 
   uv run scripts/compute_norm_stats.py \
     --config-name pi_behavior_b1k_fast \
     --correlation
 
-  This writes assets to:
+  기본 출력 위치는 다음과 같습니다.
 
   outputs/assets/pi_behavior_b1k_fast/IliaLarchenko/behavior_224_rgb/
 
-  Train the FAST tokenizer:
+  FAST auxiliary loss를 사용하려면 FAST tokenizer도 학습합니다.
 
   uv run scripts/train_fast_tokenizer.py \
     --config-name pi_behavior_b1k_fast \
     --encoded-dims="0:6,7:23" \
-    --vocab-size=1024
+    --vocab-size=1024=25
 
-  The tokenizer is saved under the same asset directory.
-
-  ## Training
-
-  Single-GPU example:
-
-  uv run scripts/train.py pi_behavior_b1k_fast \
-    --batch_size=16 \
-    --num_train_steps=200000 \
-    --save_interval=2000 \
-    --keep_period=10000 \
-    --log_interval=100
-
-  Multi-GPU / FSDP example:
-
-  uv run scripts/train.py pi_behavior_b1k_fast \
-    --batch_size=2048 \
-    --fsdp_devices=8 \
-    --num_train_steps=200000 \
-    --save_interval=500 \
-    --keep_period=2000 \
-    --log_interval=25
-
-  Resume training:
+  기존 학습을 이어서 실행합니다.
 
   uv run scripts/train.py pi_behavior_b1k_fast --resume
 
-  Start a fresh run in the same experiment directory:
+  같은 experiment directory에서 새로 시작하려면 다음 옵션을 사용합니다.
 
   uv run scripts/train.py pi_behavior_b1k_fast --overwrite
 
-  Disable Weights & Biases logging:
+  Weights & Biases logging을 끄려면 다음 옵션을 사용합니다.
 
   uv run scripts/train.py pi_behavior_b1k_fast --wandb_enabled=false
 
-  Default checkpoints are saved to:
+  기본 checkpoint 저장 위치는 다음과 같습니다.
 
   outputs/checkpoints/pi_behavior_b1k_fast/openpi/
 
-  ## Serving a Policy
+  ## Policy Server 실행
 
-  Start the websocket policy server:
+  학습된 checkpoint를 websocket policy server로 실행합니다.
 
   uv run scripts/serve_b1k.py \
     policy:checkpoint \
     --policy.config pi_behavior_b1k_fast \
     --policy.dir /path/to/checkpoint
 
-  The default port is 8000. To use another port:
+  기본 port는 8000입니다. 다른 port를 사용하려면 다음처럼 실행합니다.
 
   uv run scripts/serve_b1k.py \
     --port 8001 \
@@ -177,10 +151,10 @@
     --policy.config pi_behavior_b1k_fast \
     --policy.dir /path/to/checkpoint
 
-  ## Task-Specific Checkpoint Switching
+  ## Task별 Checkpoint Switching
 
-  task_checkpoint_mapping.json can be used to route different BEHAVIOR task ids
-  to different checkpoints.
+  task_checkpoint_mapping.json을 사용하면 BEHAVIOR task id별로 다른 checkpoint를
+  사용할 수 있습니다.
 
   uv run scripts/serve_b1k.py \
     --task-checkpoint-mapping task_checkpoint_mapping.json \
@@ -188,12 +162,12 @@
     --policy.config pi_behavior_b1k_fast \
     --policy.dir /path/to/initial/checkpoint
 
-  The mapping file must cover all task ids from 0 to 49.
+  mapping 파일은 0부터 49까지 모든 task id를 포함해야 합니다.
 
-  ## Evaluation
+  ## 평가
 
-  Run the policy server first, then run BEHAVIOR-1K evaluation in another
-  terminal:
+  먼저 policy server를 실행한 뒤, 다른 터미널에서 BEHAVIOR-1K evaluation을 실행
+  합니다.
 
   python BEHAVIOR-1K/omnigibson/learning/eval.py \
     log_path=./eval_logs \
@@ -203,29 +177,29 @@
     task.name=make_microwave_popcorn \
     eval_instance_ids="[0,1,2,3]"
 
-  The evaluation wrapper converts OmniGibson observations into model inputs,
-  tracks task stage state, applies optional correction rules, and converts
-  predicted action chunks into executable actions.
+  평가 wrapper는 OmniGibson observation을 모델 입력으로 변환하고, task stage
+  state를 추적하며, correction rule과 action interpolation을 적용해 실행 가능한
+  action으로 변환합니다.
 
-  ## Viewer
+  ## Viewer 실행
 
-  To sanity-check the BEHAVIOR environment:
+  BEHAVIOR 환경이 정상적으로 실행되는지 확인하려면 다음 명령을 사용합니다.
 
   uv run python run_behavior_task_viewer.py
 
-  This requires a working OmniGibson viewer / rendering setup.
+  OmniGibson viewer가 필요하므로 rendering이 가능한 환경에서 실행해야 합니다.
 
-  ## Notes
+  ## 주의사항
 
-  - This repository targets the custom JAX PiBehavior model.
-  - PyTorch inference is not implemented in this codepath.
-  - compute_norm_stats.py must be run before training or inference unless the
-    required assets are already present in the checkpoint.
-  - The default config initializes from
-    gs://openpi-assets/checkpoints/pi05_base/params. If that path is unavailabl
-    e, update the weight_loader in src/b1k/training/config.py.
-  - BEHAVIOR-1K and OmniGibson setup can be sensitive to CUDA, GPU driver,
-    display, and streaming configuration.
+  - 이 저장소는 커스텀 JAX PiBehavior 모델을 대상으로 합니다.
+  - PyTorch inference는 이 코드 경로에서 구현되어 있지 않습니다.
+  - compute_norm_stats.py를 먼저 실행하지 않으면 학습 또는 inference에서 필요한
+    normalization/correlation stats를 찾지 못할 수 있습니다.
+  - 기본 config는 gs://openpi-assets/checkpoints/pi05_base/params에서 초기 weig
+    ht를 읽습니다. 해당 경로를 사용할 수 없다면 src/b1k/training/config.py의 we
+    ight_loader를 수정해야 합니다.
+  - BEHAVIOR-1K와 OmniGibson은 CUDA, GPU driver, display, streaming 환경에 민감
+    할 수 있습니다.
 
   ## References
 
