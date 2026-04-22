@@ -101,7 +101,6 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
 def build_minimal_wandb_payload(
     reduced_info: dict[str, Any],
     *,
-    step: int | None = None,
     step_time_sec: float | None = None,
     gpu_mem_peak_mib: float | None = None,
     learning_rate: float | None = None,
@@ -120,12 +119,14 @@ def build_minimal_wandb_payload(
         "grad_norm_action_expert",
     ]
 
+    def _to_py_scalar(x):
+        if hasattr(x, "item"):
+            return x.item()
+        return x
+
     for key in keep_keys:
         if key in reduced_info:
-            payload[key] = reduced_info[key]
-
-    if step is not None:
-        payload["step"] = int(step)
+            payload[key] = _to_py_scalar(reduced_info[key])
 
     if step_time_sec is not None:
         payload["step_time"] = float(step_time_sec)
@@ -600,7 +601,10 @@ def main(config: _config.TrainConfig):
             main_metrics["learning_rate"] = current_lr
             main_metrics["step_time"] = step_time_sec
             main_metrics["gpu_mem_peak_mib"] = _GPU_MEM_PEAK_MIB
+            
             def _fmt_metric(v):
+                if hasattr(v, "item"):
+                    v = v.item()
                 if isinstance(v, (float, int)):
                     return f"{v:.8g}"
                 return str(v)
@@ -615,9 +619,8 @@ def main(config: _config.TrainConfig):
                 # - reduced_info 전체 업로드 대신 필요한 항목만 선별
                 wandb_payload = build_minimal_wandb_payload(
                     reduced_info,
-                    step=step,
                     step_time_sec=step_time_sec,
-                    gpu_mem_peak_mib=_GPU_MEM_PEAK_MIB,  # 현재 step에서 관측된 GPU 메모리 피크값
+                    gpu_mem_peak_mib=_GPU_MEM_PEAK_MIB,
                     learning_rate=current_lr,
                 )
                 logging.info(f"[W&B PAYLOAD] step={step} payload_keys={list(wandb_payload.keys())} payload={wandb_payload}")
