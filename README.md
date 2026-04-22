@@ -1,259 +1,201 @@
-# BEHAVIOR Challenge Solution
+  # BEHAVIOR-1K Solution
 
-**1st Place | Public Leaderboard: 26% | Private Leaderboard: 26%**
+  BEHAVIOR-1K Challenge용 OpenPI 기반 학습 및 평가 코드입니다. 이 저장소는
+  Stanford `BEHAVIOR-1K` 환경과 Physical Intelligence `openpi`를 함께 사용하며,
+  BEHAVIOR-1K 50개 challenge task를 위한 `pi_behavior` 정책 모델, 데이터 전처리,
+  학습 스크립트, websocket policy server를 포함합니다.
 
-This repository contains our winning solution for the [2025 BEHAVIOR Challenge](https://behavior.stanford.edu/challenge/), achieving a 26% success rate on both the public and private evaluation sets. Our approach builds upon [Physical Intelligence's Pi0.5](https://www.physicalintelligence.company/blog/pi0) vision-language-action model with several architectural and training innovations.
+  이 README는 현재 저장소의 코드 기준으로 작성되어 있습니다.
 
-**📄 [Technical Report](https://arxiv.org/abs/2512.06951)** | **👀 [Blog Post](https://robot-learning-collective.github.io/winning-behavior-1k-challenge)** | **🎥 [Video](https://www.youtube.com/watch?v=J4wpO0EdCZs)**
+  ## 구성
 
----
+  - `src/b1k/models/`: BEHAVIOR-1K용 `PiBehavior` 모델과 observation/config 정의
+  - `src/b1k/training/`: 학습 config, data loader, checkpoint/weight loader
+  - `src/b1k/policies/`: checkpoint에서 policy를 만들고 task별 checkpoint
+  switching 처리
+  - `src/b1k/shared/`: 평가 wrapper, normalization, correction rule
+  - `scripts/train.py`: JAX/FSDP 학습 스크립트
+  - `scripts/compute_norm_stats.py`: state/action normalization 및 action
+  correlation 통계 생성
+  - `scripts/train_fast_tokenizer.py`: FAST auxiliary loss용 action tokenizer 학
+  습
+  - `scripts/serve_b1k.py`: OmniGibson evaluation에서 호출할 websocket policy
+  server
+  - `task_checkpoint_mapping.json`: task id별 checkpoint routing 예시
+  - `BEHAVIOR-1K/`: 공식 BEHAVIOR-1K / OmniGibson 코드
+  - `openpi/`: OpenPI 코드
 
-## 🏆 Solution Summary
-We use policy based on Pi0.5 and built on top of [openpi](https://github.com/Physical-Intelligence/openpi) repository.
+  ## 모델 요약
 
-**Key Architecture Changes:**
-- Replaced language model with 50 trainable task embeddings (no text processing)
-- Correlated noise for Flow Matching: noise is sampled from N(0, 0.5*I + 0.5*Σ) instead of independent noise, where Σ is the action correlation matrix
-- Each layer of the Action Expert attends to linear combination of all VLM layers KV (learnable weights)
-- Attention: Images and task embeddings bidirectionally attend to each other, stage (system 2 - see below) and robot state bidirectionally attend to each other and to images and task embeddings, FAST tokens attend to all mentioned above + causally to each other, Flow Matching attends to everything except FAST tokens and attends to each other bidirectionally
+  기본 config 이름은 `pi_behavior_b1k_fast`입니다.
 
-**Key Training Changes:**
-- Multi-step Flow Matching: 15 action expert predictions (with different time and noise sampled) per each VLM step to reduce training variance
-- Delta action space with per-timestamp normalization
-- Extra FAST auxiliary loss with 0.05 weight (no knowledge insulation)
-- 0.1 weight for subtask prediction loss (system 2 logic, see below)
-- Trained on 224x224 RGB images + proprioception states only
+  - Pi0.5/OpenPI 계열 VLA 구조를 BEHAVIOR-1K에 맞게 수정
+  - 자연어 prompt 대신 50개 task id와 현재 subtask/stage embedding 사용
+  - RGB 3-view 이미지와 proprioception state 사용
+  - action horizon 30, action dim 32로 학습하며 실제 BEHAVIOR action은 23차원 사
+  용
+  - delta joint action과 per-timestamp normalization 사용
+  - action correlation 기반 correlated noise flow matching 지원
+  - FAST auxiliary action token loss 지원
+  - subtask/stage prediction auxiliary loss 지원
+  - inference wrapper에서 rolling inpainting, action interpolation, stage
+  voting, correction rule 적용
 
-**System 2 Implementation:**
-- Predicts current task stage (5-15 stages per task solely based on the timestamps) as auxiliary output from VLM (using only images and task embeddings)
-- Stage tracking with voting logic for smooth transitions and non-Markovian resolution, passed as input to the model (using mix of sin encoded subtask state and learnable embeddings)
+  ## 설치
 
-**Inference Optimizations:**
-- Soft inpainting: predict 30 actions, execute 26, keep 4 for next prediction for inpainting. Inpainting is soft (only first 70% of the denoising steps are inpainted) and correlation aware (the rest of the actions are guided towards the linear regression prediction for them from the original 4 actions).
-- 1.3x speedup via cubic interpolation (26 predicted actions are executed in 20 steps). Speed up is disabled when gripper state is changing
-- General correction rule: open gripper after failed grasp attempts.
-- Extra hardcoded correction rule for radio tasks (probably not important but is kept as a legacy).
-- We use 4 checkpoints of the same model for different tasks. They were initially trained on 50 tasks simultaneously but later split and finetuned on the separate subsets of tasks.
+  권장 환경은 Linux, Python 3.11, CUDA 12 계열 GPU 환경입니다.
 
+  ```bash
+  git clone --recurse-submodules https://github.com/SUN-STAR-HASH/behavior1k.git
+  cd behavior1k
 
-## 🚀 Quick Start
+  bash setup_remote.sh
 
-### Installation
+  setup_remote.sh는 system dependency, uv, openpi, 현재 패키지, BEHAVIOR-1K/
+  bddl, BEHAVIOR-1K/OmniGibson[eval]를 설치합니다.
 
-```bash
-# Clone with submodules (includes openpi and BEHAVIOR-1K)
-git clone --recurse-submodules https://github.com/ilialarchenko/behavior-1k-solution.git
-cd behavior-1k-solution
+  ## 데이터 준비
 
-# Run setup script (installs uv, dependencies, and sets up environment)
-bash setup_remote.sh
-```
+  기본 config는 resized RGB 데이터셋 IliaLarchenko/behavior_224_rgb를 사용하도록
+  되어 있습니다.
 
-### Dataset Preparation
+  uv run huggingface-cli login
 
-Download the official BEHAVIOR-1K dataset from HuggingFace:
+  uv run python - <<'PY'
+  from huggingface_hub import snapshot_download
 
-```bash
-# Login to HuggingFace (need to avoid request rate limit errors)
-uv run huggingface-cli login
+  snapshot_download(
+      repo_id="IliaLarchenko/behavior_224_rgb",
+      repo_type="dataset",
+      local_dir="./data/behavior_224_rgb",
+      local_dir_use_symlinks=False,
+  )
+  PY
 
-# Download the full dataset (~2TB)
-uv run python - <<'PY'
-from huggingface_hub import snapshot_download
-snapshot_download(
-  repo_id="behavior-1k/2025-challenge-demos",
-  repo_type="dataset",
-  local_dir="./data/behavior_dataset",
-  local_dir_use_symlinks=False
-)
-PY
-```
+  사용자 환경에 맞게 src/b1k/training/config.py의 경로를 수정하세요.
 
-**Alternative**: Use the resized RGB-only dataset (224×224, ~260GB) for faster training:
-```bash
-uv run python - <<'PY'
-from huggingface_hub import snapshot_download
-snapshot_download(
-  repo_id="IliaLarchenko/behavior_224_rgb",
-  repo_type="dataset",
-  local_dir="./data/behavior_224_rgb",
-  local_dir_use_symlinks=False
-)
-PY
-```
+  behavior_dataset_root="./data/behavior_224_rgb"
+  assets_base_dir="./outputs/assets"
+  checkpoint_base_dir="./outputs/checkpoints"
 
-### Configuration
+  데이터 loader는 parquet 파일을 다음 구조에서 찾습니다.
 
-Update paths in `src/b1k/training/config.py` (lines 334-378) as needed:
+  <behavior_dataset_root>/data/task-*/episode_*.parquet
 
-```python
-repo_id="behavior-1k/2025-challenge-demos",
-behavior_dataset_root="/path/to/data/behavior_dataset",
-assets_base_dir="/path/to/outputs/assets",
-checkpoint_base_dir="/path/to/outputs/checkpoints",
-```
+  ## 전처리
 
-### Pre-training Setup
+  학습 전에 normalization stats가 필요합니다.
 
-Compute dataset statistics and train FAST tokenizer:
+  uv run scripts/compute_norm_stats.py \
+    --config-name pi_behavior_b1k_fast \
+    --correlation
 
-```bash
-# Compute normalization statistics with correlation matrix
-uv run scripts/compute_norm_stats.py --config-name pi_behavior_b1k_fast --correlation
+  FAST auxiliary loss를 사용하려면 tokenizer도 학습합니다.
 
-# Train FAST tokenizer for action discretization
-uv run scripts/train_fast_tokenizer.py \
-  --config-name pi_behavior_b1k_fast \
-  --encoded-dims="0:6,7:23" \
-  --vocab-size=1024
-```
+  uv run scripts/train_fast_tokenizer.py \
+    --config-name pi_behavior_b1k_fast \
+    --encoded-dims="0:6,7:23" \
+    --vocab-size=1024
 
-**Note**: If using pre-trained checkpoints, you can skip this step and copy assets from the checkpoint directory.
+  출력은 기본적으로 아래에 저장됩니다.
 
-### Training
+  outputs/assets/pi_behavior_b1k_fast/IliaLarchenko/behavior_224_rgb/
 
-Login to Weights & Biases for experiment tracking (optional):
+  ## 학습
 
-```bash
-uv run wandb login
-```
+  단일 GPU 예시:
 
-**Single GPU Training**:
-```bash
-uv run scripts/train.py pi_behavior_b1k_fast \
-  --batch_size=16 \
-  --num_train_steps=200000 \
-  --save_interval=2000 \
-  --keep_period=10000 \
-  --log_interval=100
-```
+  uv run scripts/train.py pi_behavior_b1k_fast \
+    --batch_size=16 \
+    --num_train_steps=200000 \
+    --save_interval=2000 \
+    --keep_period=10000 \
+    --log_interval=100
 
-**Multi-GPU Training**:
-```bash
-uv run scripts/train.py pi_behavior_b1k_fast \
-  --batch_size=2048 \
-  --num_train_steps=200000 \
-  --fsdp_devices=8 \
-  --save_interval=250 \
-  --keep_period=4000 \
-  --log_interval=25
-```
+  멀티 GPU/FSDP 예시:
 
-Adjust batch size and other parameters to your needs.
+  uv run scripts/train.py pi_behavior_b1k_fast \
+    --batch_size=2048 \
+    --fsdp_devices=8 \
+    --num_train_steps=200000 \
+    --save_interval=500 \
+    --keep_period=2000 \
+    --log_interval=25
 
-We used Fully Sharded Data Parallel (FSDP) - for training that allows to use a bigger batch size on multiple GPUs. openpi supports other multi-GPU modes but they were not tested and not used in this project. Please set `fsdp_devices=<number of GPUs>` to avoid any issues.
+  기존 학습을 이어서 실행:
 
-Use `--overwrite` to start a new training and overwrite existing checkpoints or `--resume` to continue training from the last checkpoint. `--resume` works only with the same number of GPUs as the original training.
+  uv run scripts/train.py pi_behavior_b1k_fast --resume
 
+  Weights & Biases를 사용하지 않으려면:
 
-### Fine-tuning
+  uv run scripts/train.py pi_behavior_b1k_fast --wandb_enabled=false
 
-You can initialize model weights either from already pretrained checkpoint or from Pi0.5 model (in this case all new parameters will get initial/random weights). Specify it in the training config. Our solution was initialized from Pi0.5 base model. 
+  기본 checkpoint 저장 위치:
 
-```python
-weight_loader=weight_loaders.PiBehaviorWeightLoader("/path/to/model/params")
-```
+  outputs/checkpoints/pi_behavior_b1k_fast/openpi/
 
-### Evaluation
+  ## Policy Server
 
-Start the policy server:
+  학습된 checkpoint를 websocket server로 띄웁니다.
 
-```bash
-uv run scripts/serve_b1k.py policy:checkpoint \
-  --policy.config pi_behavior_b1k_fast \
-  --policy.dir /path/to/checkpoint
-```
-
-In a separate terminal, [run evaluation](https://behavior.stanford.edu/challenge/baselines.html) (requires BEHAVIOR-1K environment):
-
-```bash
-python BEHAVIOR-1K/omnigibson/learning/eval.py \
-  log_path=./eval_logs \
-  policy=websocket \
-  task.name=make_microwave_popcorn \
-  model.host=localhost \
-  eval_instance_ids="[0,1,2,3]"
-```
-
-**Note**: this repo supports only our modification of the model developed for the competition, if you want to use Pi0.5 or Pi0 policies, use original [openpi](https://github.com/Physical-Intelligence/openpi) repository.
-
----
-
-## 📦 Pre-trained Checkpoints
-
-We provide 4 specialized checkpoints that we used for our competition submission. We initially trained them on all 50 tasks but later split and finetuned on the separate subsets of tasks. It was mostly done because of the time and resources constraints, we believe that longer training on 50 tasks can achieve comparable results.
-
-All checkpoints are available on HuggingFace in the same repository: [🤗 Checkpoints](https://huggingface.co/IliaLarchenko/behavior_submission)
-
-You can download them together or one by one.
-
-
-| Checkpoint | Task Count | Task IDs |
-|------------|------------|----------|
-| **Checkpoint 1** | 20 tasks | 2, 3, 5, 6, 10, 11, 13, 14, 15, 19, 23, 24, 25, 28, 29, 34, 42, 44, 47, 48 |
-| **Checkpoint 2** | 16 tasks | 0, 1, 7, 8, 9, 12, 16, 17, 18, 20, 21, 22, 26, 30, 43, 45 |
-| **Checkpoint 3** | 13 tasks | 4, 27, 31, 32, 33, 35, 36, 37, 38, 39, 41, 46, 49 |
-| **Checkpoint 4** | 1 task | 40 |
-
-You can run evaluation using all 4 checkpoints at once by configuring it in the `task_checkpoint_mapping.json` file. The policy will use the checkpoint corresponding to the task_id received from the server.
-
-```bash
-uv run scripts/serve_b1k.py --task-checkpoint-mapping task_checkpoint_mapping.json \
+  uv run scripts/serve_b1k.py \
     policy:checkpoint \
-  --policy.config pi_behavior_b1k_fast \
-  --policy.dir ~/models/checkpoint_1 #path to any checkpoint
-```
+    --policy.config pi_behavior_b1k_fast \
+    --policy.dir /path/to/checkpoint
 
-We also provide the intermediate checkpoint achieved after the first stage of the model training (simultaneously on 50 tasks). It is not the part of the final submission. 
-We didn't properly evaluate it on the full dataset but our guess is that it can achieve around 15-20% q-score. You can find it [here](https://huggingface.co/IliaLarchenko/behavior_50t_checkpoint).
+  기본 port는 8000입니다. 변경하려면 --port를 사용합니다.
 
-## 👥 Core Team
+  task별로 다른 checkpoint를 쓰려면 task_checkpoint_mapping.json의 path를 수정한
+  뒤 실행합니다.
 
-- **[Ilia Larchenko](https://github.com/IliaLarchenko)**
-- **[Zarin Gleb](https://github.com/zaringleb)**
-- **[Akash Karnatak](https://github.com/akashkarnatak)**
+  uv run scripts/serve_b1k.py \
+    --task-checkpoint-mapping task_checkpoint_mapping.json \
+    policy:checkpoint \
+    --policy.config pi_behavior_b1k_fast \
+    --policy.dir /path/to/initial/checkpoint
 
-## 🙏 Acknowledgments
+  mapping 파일은 0부터 49까지 모든 task id를 포함해야 합니다.
 
-We would like to thank:
+  ## 평가
 
-- **[Vladimir Ershov](https://github.com/Vladimir-Ershov)**
-- **[Justyna Ilczuk](https://github.com/ilonajulczuk)**
-- **[Andrey Mulenkov](https://github.com/MulixBF)**
+  policy server를 먼저 실행한 뒤, 다른 터미널에서 BEHAVIOR-1K evaluation을 실행
+  합니다.
 
+  python BEHAVIOR-1K/omnigibson/learning/eval.py \
+    log_path=./eval_logs \
+    policy=websocket \
+    model.host=localhost \
+    model.port=8000 \
+    task.name=make_microwave_popcorn \
+    eval_instance_ids="[0,1,2,3]"
 
-Special thanks to **[Nebius](https://nebius.com/)** for providing cloud GPU compute resources and sponsoring the development of our solution.
+  평가 wrapper는 BEHAVIOR observation을 모델 입력으로 변환하고, task id 기반
+  stage state를 유지하며, action sequence를 실행용 action으로 변환합니다.
 
+  ## Viewer
 
-Special thanks to **[Physical Intelligence](https://www.physicalintelligence.company/)** for providing open source work on Pi0.5 and openpi which was a great inspiration and fundament of our solution.
+  환경이 제대로 뜨는지 확인하려면:
 
+  uv run python run_behavior_task_viewer.py
 
-## 📚 References
+  OmniGibson viewer가 필요하므로 GUI/renderer가 가능한 환경에서 실행해야 합니다.
 
-**BEHAVIOR-1K Challenge**
-- Website: [BEHAVIOR Challenge 2025](https://behavior.stanford.edu/challenge/)
-- Paper: Li et al., "BEHAVIOR-1K: A Human-Centered, Embodied AI Benchmark with 1,000 Everyday Activities and Realistic Simulation" (2024) [[arXiv:2403.09227]](https://arxiv.org/abs/2403.09227)
-- Dataset: [HuggingFace Dataset](https://huggingface.co/datasets/behavior-1k/2025-challenge-demos)
-- Code: [BEHAVIOR-1K Repository](https://github.com/StanfordVL/BEHAVIOR-1K)
+  ## 주의사항
 
-**Pi0.5 (Physical Intelligence)**
-- Blog post: [π0.5: a VLA with Open-World Generalization](https://www.physicalintelligence.company/blog/pi05)
-- Code: [OpenPI Repository](https://github.com/Physical-Intelligence/openpi)
-- Paper: [π0.5](https://www.physicalintelligence.company/download/pi05.pdf)
+  - 이 저장소의 inference는 PiBehavior JAX checkpoint를 대상으로 합니다. PyTorch
+    checkpoint inference는 구현되어 있지 않습니다.
+  - compute_norm_stats.py를 먼저 실행하지 않으면 학습과 inference에서
+    normalization/correlation stats를 찾지 못합니다.
+  - config의 기본 weight loader는
+    gs://openpi-assets/checkpoints/pi05_base/params에서 Pi0.5 base weight를 읽
+    습니다. 접근이 안 되는 환경에서는 src/b1k/training/config.py의 weight_loade
+    r를 로컬 checkpoint 또는 NoOpWeightLoader로 바꿔야 합니다.
+  - BEHAVIOR-1K와 OmniGibson 설치는 GPU driver, CUDA, display/streaming 환경 영
+    향을 많이 받습니다. 환경 문제는 먼저 공식 BEHAVIOR-1K quickstart가 동작하는
+    지 확인하는 것이 좋습니다.
 
+  ## References
 
-## Citation
-
-If you find this work useful, please cite:
-
-```bibtex
-@misc{larchenko2025behavior,
-      title={Task adaptation of Vision-Language-Action model: 1st Place Solution for the 2025 BEHAVIOR Challenge}, 
-      author={Ilia Larchenko and Gleb Zarin and Akash Karnatak},
-      year={2025},
-      eprint={2512.06951},
-      archivePrefix={arXiv},
-      primaryClass={cs.RO},
-      url={https://arxiv.org/abs/2512.06951}, 
-}
-```
+  - BEHAVIOR-1K: https://github.com/StanfordVL/BEHAVIOR-1K
+  - BEHAVIOR Challenge: https://behavior.stanford.edu/challenge/
+  - OpenPI: https://github.com/Physical-Intelligence/openpi
