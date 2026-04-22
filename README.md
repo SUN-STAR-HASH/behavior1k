@@ -1,6 +1,7 @@
-   # BEHAVIOR-1K OpenPI Solution
+    # BEHAVIOR-1K OpenPI Solution
 
   이 저장소는 OpenPI 기반의 BEHAVIOR-1K 정책 학습 및 평가 파이프라인입니다.
+
   BEHAVIOR-1K Challenge 환경에서 사용할 수 있는 커스텀 `PiBehavior` 모델, 데이터
   전처리, normalization 통계 계산, FAST tokenizer 학습, checkpoint 로딩,
   OmniGibson 평가용 websocket policy server를 포함합니다.
@@ -116,7 +117,30 @@
   uv run scripts/train_fast_tokenizer.py \
     --config-name pi_behavior_b1k_fast \
     --encoded-dims="0:6,7:23" \
-    --vocab-size=1024=25
+    --vocab-size=1024
+
+  tokenizer는 같은 asset directory 아래에 저장됩니다.
+
+  ## 학습
+
+  단일 GPU 학습 예시입니다.
+
+  uv run scripts/train.py pi_behavior_b1k_fast \
+    --batch_size=16 \
+    --num_train_steps=200000 \
+    --save_interval=2000 \
+    --keep_period=10000 \
+    --log_interval=100
+
+  멀티 GPU / FSDP 학습 예시입니다.
+
+  uv run scripts/train.py pi_behavior_b1k_fast \
+    --batch_size=2048 \
+    --fsdp_devices=8 \
+    --num_train_steps=200000 \
+    --save_interval=500 \
+    --keep_period=2000 \
+    --log_interval=25
 
   기존 학습을 이어서 실행합니다.
 
@@ -206,4 +230,6 @@
   - BEHAVIOR-1K: https://github.com/StanfordVL/BEHAVIOR-1K
   - BEHAVIOR Challenge: https://behavior.stanford.edu/challenge/
   - OpenPI: https://github.com/Physical-Intelligence/openpi
+
+
 
