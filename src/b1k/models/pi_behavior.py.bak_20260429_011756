@@ -1089,7 +1089,7 @@ class PiBehavior(_model.BaseModel):
         # Pi0의 sample_actions와 동일하게 inference용 observation 전처리를 거친다.
         # 현재 PiBehavior는 b1k.models.observation 쪽 preprocess_observation을 import하고 있으므로
         # 여기서는 그 경로를 우선 사용한다.
-        observation = preprocess_observation(None, observation, train=False)
+        observation = preprocess_observation(observation, train=False)
 
         # diffusion 관례:
         #   t=1.0 -> pure noise

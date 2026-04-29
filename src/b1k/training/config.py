@@ -918,7 +918,7 @@ _CONFIGS.append(
         batch_size=28,   # [2026-04-19 수정] bs8 -> bs28
         num_workers=6,   # [2026-04-19 수정] w4 -> w6
         num_train_steps=70_000, # [2026-04-22 수정] train_steps=30_000 -> train_steps=70_000
-        log_interval=100,
+        log_interval=10,
         save_interval=1000,
         keep_period=5000,
         wandb_enabled=True,

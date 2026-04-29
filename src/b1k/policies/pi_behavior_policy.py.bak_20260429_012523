@@ -172,40 +172,10 @@ class PiBehaviorPolicy(Policy):
 
         start_time = time.monotonic()
 
-        # PiBehavior.sample_actions()는 (actions, subtask_logits) 튜플을 반환
-        # 이것이 이 클래스가 존재하는 유일한 이유이다.
-        # 부모 클래스는 단순 백업 batch를 기대하므로 여기서 언패킹한다.
-
-        # [수정일: 2026-04-29]
-        # [수정 이유]
-        # OmniGibson eval/websocket에서는 rolling inference를 위해
-        # initial_actions를 sample_kwargs에 넣어 policy server로 전달한다.
-        #
-        # 하지만 현재 PiBehavior.sample_actions() 함수는 initial_actions 인자를
-        # 받지 않으므로, 그대로 넘기면 아래 에러가 발생한다.
-        #
-        # TypeError: PiBehavior.sample_actions() got an unexpected keyword argument 'initial_actions'
-        #
-        # 따라서 모델 호출 직전에 initial_actions를 제거한다.
-        # line 166에서 sample_kwargs["initial_actions"]가 들어가더라도,
-        # 실제 PiBehavior.sample_actions() 호출 전에는 제거되어야 한다.
-        sample_kwargs = dict(sample_kwargs)
-        sample_kwargs.pop("initial_actions", None)
-
         # PiBehavior.sample_actions()는 (actions, subtask_logits) 튜플을 반환한다.
         # 이것이 이 클래스가 존재하는 유일한 이유이다.
         # 부모 클래스는 단순 배열 반환을 기대하므로 여기서 언패킹한다.
-        sample_result = self._sample_actions(sample_rng, observation, **sample_kwargs)
-
-        # 현재 PiBehavior.sample_actions()는 버전에 따라
-        # 1) actions 하나만 반환하거나
-        # 2) (actions, subtask_logits) 튜플을 반환할 수 있다.
-        # eval에서는 action만 있어도 되므로, subtask_logits가 없으면 더미 값으로 채운다.
-        if isinstance(sample_result, tuple):
-            actions, subtask_logits = sample_result
-        else:
-            actions = sample_result
-            subtask_logits = jnp.zeros((actions.shape[0], 15), dtype=actions.dtype)
+        actions, subtask_logits = self._sample_actions(sample_rng, observation, **sample_kwargs)
 
         model_time = time.monotonic() - start_time
 
