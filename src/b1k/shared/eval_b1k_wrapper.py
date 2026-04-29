@@ -43,29 +43,27 @@ RESIZE_SIZE = 224
 
 @dataclasses.dataclass
 class B1KWrapperConfig:
-    """B1K 서빙용 최소 wrapper 설정.
-
-    actions_to_execute:
-        모델은 보통 여러 step의 행동을 한꺼번에 예측한다.
-        그중 실제 환경에 몇 개까지 실행할지 정한다.
-
-    actions_to_keep:
-        rolling inpainting을 쓸 때 이전 예측의 마지막 행동 몇 개를 다음 예측에
-        힌트로 남길지 정한다. 0이면 이전 행동을 이어 붙이지 않는다.
-
-    execute_in_n_steps:
-        action compression을 쓸 때 actions_to_execute개의 행동을 몇 step에
-        압축해서 실행할지 정한다.
-    """
+    # [수정일: 2026-04-29]
+    # [수정 이유]
+    # 현재 70k checkpoint에서 26→20 action compression과 inpainting을 켜면
+    # base/arm action이 과하게 들어가 로봇이 넘어지는 현상이 발생한다.
+    #
+    # 따라서 먼저 안정성 확인을 위해 가장 보수적인 eval 설정으로 되돌린다.
+    # - action compression 끔: actions_to_execute == execute_in_n_steps
+    # - inpainting 끔: actions_to_keep = 0
+    # - eval tricks 끔: action 보정 rule 영향 제거
+    #
+    # 이 설정에서 로봇이 안 넘어지면,
+    # 원인은 policy 자체보다는 compression/inpainting 설정일 가능성이 크다.
     actions_to_execute: int = 12
     actions_to_keep: int = 0
     execute_in_n_steps: int = 12
+
     history_len: int = 1
     votes_to_promote: int = 1
     time_threshold_inpaint: float = 0.3
     num_steps: int = 8
     apply_eval_tricks: bool = False
-
 
 class B1KPolicyWrapper():
     """PI_BEHAVIOR 모델을 BEHAVIOR 평가 서버 형식에 맞춰 감싸는 클래스.
@@ -330,6 +328,17 @@ class B1KPolicyWrapper():
             self.action_index = 0
             
         current_action = self.last_actions[self.action_index]
+        # [수정일: 2026-04-29]
+        # [디버그 목적]
+        # base action을 완전히 0으로 막으면 로봇이 넘어지지는 않지만 움직이지 않는다.
+        # 따라서 base action을 완전히 제거하지 않고, 작은 범위로 제한해서
+        # "넘어지지 않으면서 움직이는지" 확인한다.
+        #
+        # current_action[:3]은 base 이동/회전 velocity 계열로 보인다.
+        # 이 값이 너무 크면 로봇이 급격하게 움직이다가 넘어질 수 있다.
+        current_action = current_action.copy()
+        current_action[:3] = np.clip(current_action[:3] * 0.25, -0.08, 0.08)
+
         self.action_index += 1
         self.step_count += 1
         

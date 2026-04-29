@@ -1061,21 +1061,20 @@ class PiBehavior(_model.BaseModel):
         return tokens, input_mask, ar_mask, adarms_cond
 
 
-    # [2026-04-17] PiBehavior 정식 sample_actions 추가
-    # 목적:
-    #   OpenPI BaseModel 인터페이스를 만족시키고,
-    #   Pi0와 같은 flow-matching ODE 샘플링 경로를 PiBehavior에서도 사용한다.
+    # [수정일: 2026-04-29]
+    # [수정 이유]
+    # eval/websocket inference에서 rolling inpainting을 제대로 사용하기 위해
+    # initial_actions 인자를 PiBehavior.sample_actions()에서 직접 받도록 수정한다.
     #
-    # 설계:
-    #   1) observation을 inference용 전처리
-    #   2) prefix를 한 번 forward 해서 KV cache 생성
-    #   3) x_t ~ N(0, I) 에서 시작
-    #   4) t=1 -> 0 방향으로 suffix forward를 반복하며 velocity v_t 예측
-    #   5) x_{t-dt} = x_t + dt * v_t   (dt < 0)
+    # 기존 문제:
+    # - PiBehavior.sample_actions()가 initial_actions를 받지 않음
+    # - policy 쪽에서 initial_actions를 pop으로 제거함
+    # - sample_actions()가 actions 하나만 반환해서 policy 쪽에서 subtask_logits를 더미 zero로 채움
     #
-    # 참고:
-    #   dt를 음수로 두는 이유는 Pi0 구현과 동일하게
-    #   "noise(1.0) -> clean(0.0)" 방향으로 적분하기 위해서다.
+    # 수정 목표:
+    # - initial_actions를 유지해서 action chunk 간 연속성을 보존
+    # - sample_actions()가 (actions, subtask_logits)를 반환
+    # - policy 쪽 임시 패치를 제거할 수 있게 함
     @override
     def sample_actions(
         self,
@@ -1084,25 +1083,52 @@ class PiBehavior(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
-    ) -> _model.Actions:
-        # [2026-04-17]
-        # Pi0의 sample_actions와 동일하게 inference용 observation 전처리를 거친다.
-        # 현재 PiBehavior는 b1k.models.observation 쪽 preprocess_observation을 import하고 있으므로
-        # 여기서는 그 경로를 우선 사용한다.
+        initial_actions: at.Float[at.Array, "b ah ad"] | None = None,
+    ):
+        # inference용 observation 전처리
         observation = preprocess_observation(None, observation, train=False)
 
-        # diffusion 관례:
-        #   t=1.0 -> pure noise
-        #   t=0.0 -> target(clean action)
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
 
+        # 초기 noise 생성
         if noise is None:
             noise = jax.random.normal(
                 rng,
                 (batch_size, self.action_horizon, self.action_dim),
                 dtype=jnp.float32,
             )
+        else:
+            noise = jnp.asarray(noise, dtype=jnp.float32)
+
+        # ---------------------------------------------------------------
+        # initial_actions 처리
+        # ---------------------------------------------------------------
+        # initial_actions는 이전 prediction에서 남겨둔 action chunk다.
+        # flow matching에서는 t 시점의 action이
+        # x_t = (1 - t) * clean_action + t * noise
+        # 형태이므로, inpainting으로 고정할 action도 timestep에 맞게 noising해서 넣어야 한다.
+        use_inpainting = initial_actions is not None
+
+        if use_inpainting:
+            initial_actions = jnp.asarray(initial_actions, dtype=jnp.float32)
+
+            if initial_actions.ndim == 2:
+                initial_actions = initial_actions[None, ...]
+
+            # action_horizon보다 길면 자르고, 짧으면 뒤쪽은 0으로 채운다.
+            keep_len = min(initial_actions.shape[1], self.action_horizon)
+
+            initial_full = jnp.zeros_like(noise)
+            initial_full = initial_full.at[:, :keep_len, :].set(
+                initial_actions[:, :keep_len, :]
+            )
+
+            inpaint_mask = jnp.zeros_like(noise, dtype=jnp.bool_)
+            inpaint_mask = inpaint_mask.at[:, :keep_len, :].set(True)
+        else:
+            initial_full = jnp.zeros_like(noise)
+            inpaint_mask = jnp.zeros_like(noise, dtype=jnp.bool_)
 
         # ---------------------------------------------------------------
         # 1) prefix forward 1회로 KV cache 생성
@@ -1111,11 +1137,43 @@ class PiBehavior(_model.BaseModel):
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
 
-        _, kv_cache = self.PaliGemma.llm(
+        (prefix_out, _), kv_cache_full = self.PaliGemma.llm(
             [prefix_tokens, None],
             mask=prefix_attn_mask,
             positions=prefix_positions,
         )
+
+        # stage/subtask logits 계산
+        # 기본 12-task baseline은 tokenized_prompt에 task id 하나만 들어오므로
+        # stage prompt가 없으면 zero logits를 반환한다.
+        has_stage_prompt = (
+            observation.tokenized_prompt is not None
+            and observation.tokenized_prompt.shape[1] > 1
+        )
+
+        if has_stage_prompt:
+            first_stage_token_idx = jnp.argmax(prefix_ar_mask)
+            base_task_token_idx = first_stage_token_idx - 1
+            base_task_output = prefix_out[:, base_task_token_idx, :]
+
+            subtask_logits = self.stage_pred_from_vlm(base_task_output)
+
+            task_ids = observation.tokenized_prompt[:, 0]
+            task_num_stages_array = jnp.array(TASK_NUM_STAGES, dtype=jnp.int32)
+            task_num_stages = task_num_stages_array[task_ids]
+
+            stage_range = jnp.arange(MAX_NUM_STAGES)
+            valid_mask = stage_range[None, :] < task_num_stages[:, None]
+            subtask_logits = jnp.where(valid_mask, subtask_logits, -jnp.inf)
+        else:
+            subtask_logits = jnp.zeros(
+                (batch_size, MAX_NUM_STAGES),
+                dtype=prefix_out.dtype,
+            )
+
+        kv_cache = kv_cache_full
+        if self.kv_transform is not None:
+            kv_cache = self.kv_transform(kv_cache)
 
         # ---------------------------------------------------------------
         # 2) reverse ODE loop
@@ -1123,16 +1181,18 @@ class PiBehavior(_model.BaseModel):
         def step(carry):
             x_t, time = carry
 
+            # inpainting 영역은 현재 time에 맞게 noising된 initial action으로 고정
+            noised_initial = (1.0 - time) * initial_full + time * noise
+            x_t = jnp.where(inpaint_mask, noised_initial, x_t)
+
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
                 observation,
                 x_t,
                 jnp.broadcast_to(time, batch_size),
             )
 
-            # suffix 내부 attention mask
             suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
 
-            # suffix query가 prefix key/value 전체를 볼 수 있게 하는 mask
             prefix_to_suffix_mask = einops.repeat(
                 prefix_mask,
                 "b p -> b s p",
@@ -1144,40 +1204,41 @@ class PiBehavior(_model.BaseModel):
                 axis=-1,
             )
 
-            assert full_attn_mask.shape == (
-                batch_size,
-                suffix_tokens.shape[1],
-                prefix_tokens.shape[1] + suffix_tokens.shape[1],
-            )
-
             suffix_positions = (
                 jnp.sum(prefix_mask, axis=-1)[:, None]
                 + jnp.cumsum(suffix_mask, axis=-1)
                 - 1
             )
 
-            (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+            (prefix_out_suffix, suffix_out), _ = self.PaliGemma.llm(
                 [None, suffix_tokens],
                 mask=full_attn_mask,
                 positions=suffix_positions,
                 kv_cache=kv_cache,
                 adarms_cond=[None, adarms_cond],
             )
-            assert prefix_out is None
 
-            # suffix hidden -> predicted velocity
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            assert prefix_out_suffix is None
 
-            # dt < 0 이므로 x_t + dt * v_t 는 t=1 -> 0 방향 적분
-            return x_t + dt * v_t, time + dt
+            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon:])
+
+            next_time = time + dt
+            x_next = x_t + dt * v_t
+
+            # 다음 timestep에서도 inpainting 영역 유지
+            noised_initial_next = (1.0 - next_time) * initial_full + next_time * noise
+            x_next = jnp.where(inpaint_mask, noised_initial_next, x_next)
+
+            return x_next, next_time
 
         def cond(carry):
             _, time = carry
-            # floating-point 오차에 robust 하게 종료
             return time >= -dt / 2
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
-        return x_0
+
+        # policy wrapper가 기대하는 형태로 반환
+        return x_0, subtask_logits
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # 손실 함수

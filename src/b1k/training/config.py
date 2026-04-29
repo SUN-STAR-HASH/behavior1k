@@ -973,6 +973,43 @@ _CONFIGS.append(
     )
 )
 
+# [2026-04-27 수정] FAST auxiliary 실험용 config
+# baseline과 동일 조건에서 use_fast_auxiliary만 켠 비교 실험
+_CONFIGS.append(
+    dataclasses.replace(
+        _smoke_cfg,
+        name="pi_behavior_b1k_a100_fast_aux_draft",
+        exp_name="a100_fast_aux_draft",
+        model=dataclasses.replace(
+            _smoke_cfg.model,
+            use_fast_auxiliary=True,
+            fast_loss_weight=0.1,
+        ),
+        data=dataclasses.replace(
+            _smoke_cfg.data,
+            assets=AssetsConfig(
+assets_dir="/home/data/projects/behavior1k/outputs/assets/pi_behavior_b1k_a100_smoke",
+                asset_id="IliaLarchenko/behavior_224_rgb",
+            ),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1000,
+            peak_lr=1e-4,
+            decay_steps=20_000,
+            decay_lr=1e-5,
+        ),
+        batch_size=28,
+        num_workers=6,
+        num_train_steps=70_000,
+        log_interval=10,
+        save_interval=1000,
+        keep_period=5000,
+        wandb_enabled=True,
+        overwrite=False,
+        resume=False,
+    )
+)
+
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
