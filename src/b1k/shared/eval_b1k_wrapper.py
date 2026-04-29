@@ -24,6 +24,7 @@
     일부러 따로 들고 간다.
 """
 
+import os
 import logging
 import numpy as np
 import torch
@@ -328,16 +329,82 @@ class B1KPolicyWrapper():
             self.action_index = 0
             
         current_action = self.last_actions[self.action_index]
+
         # [수정일: 2026-04-29]
         # [디버그 목적]
-        # base action을 완전히 0으로 막으면 로봇이 넘어지지는 않지만 움직이지 않는다.
-        # 따라서 base action을 완전히 제거하지 않고, 작은 범위로 제한해서
-        # "넘어지지 않으면서 움직이는지" 확인한다.
+        # 로봇이 넘어지는 원인을 action 영역별로 분리하기 위한 테스트 코드.
         #
-        # current_action[:3]은 base 이동/회전 velocity 계열로 보인다.
-        # 이 값이 너무 크면 로봇이 급격하게 움직이다가 넘어질 수 있다.
+        # 사용 방법:
+        # A100 policy server 실행 전에 아래 환경변수 설정:
+        #
+        # export B1K_ACTION_DEBUG_MODE=zero_all
+        # export B1K_ACTION_DEBUG_MODE=base_only
+        # export B1K_ACTION_DEBUG_MODE=arm_only
+        # export B1K_ACTION_DEBUG_MODE=safe_clip
+        #
+        # mode 설명:
+        # - zero_all  : 모든 action을 0으로 고정. 이 상태에서도 넘어지면 sim/init 문제.
+        # - base_only : base action만 아주 작게 허용, arm/gripper는 0. base 때문에 넘어지는지 확인.
+        # - arm_only  : base는 0, arm만 작게 허용. arm/torso 때문에 넘어지는지 확인.
+        # - safe_clip : base와 arm을 모두 작게 제한. 실제 안정화 후보.
+        #
+        # 주의:
+        # 이 코드는 성능 향상용이 아니라 원인 분리용 임시 safety filter다.
         current_action = current_action.copy()
-        current_action[:3] = np.clip(current_action[:3] * 0.25, -0.08, 0.08)
+
+        debug_mode = os.environ.get("B1K_ACTION_DEBUG_MODE", "safe_clip")
+
+        if debug_mode == "zero_all":
+            current_action[:] = 0.0
+
+        elif debug_mode == "base_only":
+            # base만 아주 작게 움직이고 arm/gripper는 고정
+            current_action[:] = 0.0
+            current_action[:3] = np.clip(
+                self.last_actions[self.action_index][:3] * 0.08,
+                -0.03,
+                0.03,
+            )
+
+        elif debug_mode == "arm_only":
+            # base는 완전히 고정하고, arm/joint만 조금 더 크게 허용한다.
+            # 방금 arm_only에서 팔이 거의 안 움직였으므로 clip 범위를 키워서 확인한다.
+            current_action[:3] = 0.0
+            current_action[3:-1] = np.clip(current_action[3:-1], -0.3, 0.3)
+            current_action[-1] = 0.0
+
+        elif debug_mode == "safe_clip":
+            # 현재 가장 보수적인 안정화 후보
+            current_action[:3] = np.clip(current_action[:3] * 0.08, -0.03, 0.03)
+            current_action[3:-1] = np.clip(current_action[3:-1], -0.08, 0.08)
+            current_action[-1] = 0.0
+
+        else:
+            raise ValueError(f"Unknown B1K_ACTION_DEBUG_MODE: {debug_mode}")
+
+        # [수정일: 2026-04-29]
+        # [디버그 목적]
+        # arm_only / safe_clip 상태에서 실제 action 값이 어느 channel에 나오는지 확인한다.
+        # 팔 카메라가 움직이지 않는 원인이
+        # 1) arm action 값이 거의 0인 것인지
+        # 2) 우리가 arm이라고 생각한 current_action[3:-1]이 실제 팔 channel이 아닌 것인지
+        # 확인하기 위한 로그다.
+        if self.step_count % 20 == 0:
+            raw_action = self.last_actions[self.action_index]
+            logger.info(
+                "[ACTION DEBUG] "
+                f"mode={debug_mode}, "
+                f"shape={raw_action.shape}, "
+                f"raw_base={raw_action[:3]}, "
+                f"raw_mid_min={raw_action[3:-1].min():.4f}, "
+                f"raw_mid_max={raw_action[3:-1].max():.4f}, "
+                f"raw_mid_mean={raw_action[3:-1].mean():.4f}, "
+                f"raw_gripper={raw_action[-1]:.4f}, "
+                f"final_base={current_action[:3]}, "
+                f"final_mid_min={current_action[3:-1].min():.4f}, "
+                f"final_mid_max={current_action[3:-1].max():.4f}, "
+                f"final_gripper={current_action[-1]:.4f}"
+            )
 
         self.action_index += 1
         self.step_count += 1
