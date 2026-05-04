@@ -988,7 +988,7 @@ _CONFIGS.append(
         data=dataclasses.replace(
             _smoke_cfg.data,
             assets=AssetsConfig(
-assets_dir="/home/data/projects/behavior1k/outputs/assets/pi_behavior_b1k_a100_smoke",
+                assets_dir="/home/data/projects/behavior1k/outputs/assets/pi_behavior_b1k_a100_smoke",
                 asset_id="IliaLarchenko/behavior_224_rgb",
             ),
         ),

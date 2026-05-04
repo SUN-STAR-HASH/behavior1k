@@ -379,6 +379,173 @@ class B1KPolicyWrapper():
             current_action[3:-1] = np.clip(current_action[3:-1], -0.08, 0.08)
             current_action[-1] = 0.0
 
+        elif debug_mode == "eval_stable_v1":
+            # [수정일: 2026-04-30]
+            # [실험 목적]
+            # probe_sweep 결과:
+            # - index 0~2는 base 계열로 보이며, 큰 base action은 넘어짐을 유발할 가능성이 큼.
+            # - index 22는 gripper로 거의 확정.
+            # - index 3~21은 arm/body 계열로 예상되지만, 너무 작게 clip하면 움직임이 거의 안 보임.
+            #
+            # 따라서 실제 eval 실험에서는:
+            # 1) base는 아주 작게만 허용
+            # 2) arm/body 계열은 기존 safe_clip보다 크게 허용
+            # 3) gripper는 일단 0으로 고정해서 불필요한 여닫힘을 막음
+            current_action[:3] = np.clip(current_action[:3] * 0.03, -0.02, 0.02)
+            current_action[3:22] = np.clip(current_action[3:22], -0.8, 0.8)
+            current_action[22] = 0.0
+        
+        elif debug_mode == "eval_stable_v2":
+            # [수정일: 2026-04-30]
+            # [실험 목적]
+            # eval_stable_v1에서 넘어짐은 해결됐지만 base 이동이 너무 작아 task 진전이 거의 없음.
+            #
+            # probe / eval 로그 기준:
+            # - index 0~2는 base 계열
+            # - 특히 base[1] 값이 계속 크게 나오므로 전후 이동 후보로 보고 더 열어준다.
+            # - base[2]는 회전/자세 불안정 가능성이 있으므로 작게 유지한다.
+            # - gripper는 아직 불필요한 여닫힘을 막기 위해 고정한다.
+            base_action = current_action[:3].copy()
+
+            # base[0]: 좌우 또는 전후 후보. v1보다 조금만 증가.
+            current_action[0] = np.clip(base_action[0] * 0.04, -0.03, 0.03)
+
+            # base[1]: 전후 이동 후보. task 진전을 위해 v1보다 크게 허용.
+            current_action[1] = np.clip(base_action[1] * 0.10, -0.07, 0.07)
+
+            # base[2]: 회전/yaw 후보. 넘어짐 방지를 위해 작게 유지.
+            current_action[2] = np.clip(base_action[2] * 0.025, -0.02, 0.02)
+
+            # arm/body 계열은 너무 작게 자르면 팔이 거의 안 움직이므로 v1과 동일하게 유지.
+            current_action[3:22] = np.clip(current_action[3:22], -0.8, 0.8)
+
+            # gripper는 일단 고정.
+            current_action[22] = 0.0
+
+        elif debug_mode == "eval_stable_v3":
+            # [수정일: 2026-04-30]
+            # [실험 목적]
+            # eval_stable_v2에서 넘어짐은 해결됐지만 base 이동이 너무 작아 task 진전이 거의 없음.
+            #
+            # 이번 v3에서는:
+            # 1) base x/y 이동을 v2보다 확실히 키운다.
+            # 2) 회전/yaw 후보인 base[2]는 여전히 작게 제한한다.
+            # 3) arm/body는 v2보다 약간 더 열어준다.
+            # 4) gripper는 여전히 고정한다.
+            base_action = current_action[:3].copy()
+
+            # base[0], base[1] 둘 중 어느 쪽이 전후 이동인지 아직 완전히 확정되지 않았으므로
+            # 둘 다 v2보다 열어준다.
+            current_action[0] = np.clip(base_action[0] * 0.10, -0.08, 0.08)
+            current_action[1] = np.clip(base_action[1] * 0.20, -0.15, 0.15)
+
+            # 회전/yaw는 넘어짐 또는 불안정 원인이 될 수 있으므로 조금만 허용한다.
+            current_action[2] = np.clip(base_action[2] * 0.035, -0.03, 0.03)
+
+            # 팔/몸통 계열은 v2보다 조금 더 허용한다.
+            current_action[3:22] = np.clip(current_action[3:22], -1.0, 1.0)
+
+            # gripper는 불필요한 여닫힘 방지.
+            current_action[22] = 0.0
+        elif debug_mode == "eval_stable_v4":
+            # [수정일: 2026-04-30]
+            # [실험 목적]
+            # eval_stable_v3에서도 넘어지지는 않았지만 base 이동이 너무 작아 task 진전이 거의 없음.
+            #
+            # v4에서는:
+            # 1) base x/y 이동을 v3보다 더 크게 허용한다.
+            # 2) 회전/yaw 후보인 base[2]는 계속 작게 유지한다.
+            # 3) arm/body는 v3와 동일하게 둔다.
+            # 4) gripper는 계속 고정한다.
+            base_action = current_action[:3].copy()
+
+            # base 이동 강화
+            current_action[0] = np.clip(base_action[0] * 0.18, -0.14, 0.14)
+            current_action[1] = np.clip(base_action[1] * 0.35, -0.25, 0.25)
+
+            # yaw/회전은 아직 위험하므로 작게 유지
+            current_action[2] = np.clip(base_action[2] * 0.03, -0.025, 0.025)
+
+            # 팔/몸통 계열
+            current_action[3:22] = np.clip(current_action[3:22], -1.0, 1.0)
+
+            # gripper 고정
+            current_action[22] = 0.0
+
+        elif debug_mode == "eval_stable_v5":
+            # [수정일: 2026-04-30]
+            # [실험 목적]
+            # eval_stable_v4에서 넘어지지는 않았지만 base 이동이 아직 부족하여
+            # turning_on_radio task에서 라디오 앞까지 접근하지 못함.
+            #
+            # v5에서는:
+            # 1) base x/y 이동을 v4보다 더 크게 허용한다.
+            # 2) yaw/회전은 넘어짐 방지를 위해 아주 작게 유지한다.
+            # 3) arm/body는 v4보다 약간 더 허용한다.
+            # 4) gripper는 완전 고정하지 않고 약하게만 허용한다.
+            base_action = current_action[:3].copy()
+
+            # base 이동 강화
+            current_action[0] = np.clip(base_action[0] * 0.25, -0.20, 0.20)
+            current_action[1] = np.clip(base_action[1] * 0.60, -0.40, 0.40)
+
+            # yaw/회전은 계속 작게 제한
+            current_action[2] = np.clip(base_action[2] * 0.015, -0.012, 0.012)
+
+            # 팔/몸통 계열은 v4보다 조금 더 허용
+            current_action[3:22] = np.clip(current_action[3:22], -1.2, 1.2)
+
+            # gripper는 완전 고정하지 않고 약하게만 허용
+            current_action[22] = np.clip(current_action[22] * 0.15, -0.25, 0.25)
+
+        elif debug_mode == "probe_sweep":
+            # [수정일: 2026-04-29]
+            # [디버그 목적]
+            # action index mapping을 찾기 위해 index를 자동으로 바꿔가며
+            # 하나의 channel만 강제로 움직인다.
+            #
+            # 사용 예:
+            # export B1K_ACTION_DEBUG_MODE=probe_sweep
+            # export B1K_PROBE_START=3
+            # export B1K_PROBE_END=23
+            # export B1K_PROBE_INTERVAL=50
+            # export B1K_PROBE_VALUE=0.3
+            #
+            # 의미:
+            # - 50 step 동안 index 3만 움직임
+            # - 다음 50 step 동안 index 4만 움직임
+            # - ...
+            # - index 22까지 확인
+            #
+            # 영상에서 어느 index일 때 wrist camera / arm / base / gripper가
+            # 움직이는지 확인하기 위한 디버그 모드다.
+            current_action[:] = 0.0
+
+            probe_start = int(os.environ.get("B1K_PROBE_START", "3"))
+            probe_end = int(os.environ.get("B1K_PROBE_END", "23"))
+            probe_interval = int(os.environ.get("B1K_PROBE_INTERVAL", "50"))
+            probe_value = float(os.environ.get("B1K_PROBE_VALUE", "0.3"))
+
+            num_probe_channels = max(1, probe_end - probe_start)
+            probe_slot = (self.step_count // probe_interval) % num_probe_channels
+            probe_index = probe_start + probe_slot
+
+            # interval 절반은 +방향, 절반은 -방향으로 줘서 움직임을 보기 쉽게 한다.
+            phase = self.step_count % probe_interval
+            sign = 1.0 if phase < (probe_interval // 2) else -1.0
+
+            if 0 <= probe_index < len(current_action):
+                current_action[probe_index] = sign * probe_value
+
+            if self.step_count % 20 == 0:
+                logger.info(
+                    f"[PROBE SWEEP] step={self.step_count}, "
+                    f"probe_index={probe_index}, "
+                    f"value={current_action[probe_index]:.4f}, "
+                    f"range=[{probe_start}, {probe_end}), "
+                    f"interval={probe_interval}"
+                )
+
         else:
             raise ValueError(f"Unknown B1K_ACTION_DEBUG_MODE: {debug_mode}")
 
