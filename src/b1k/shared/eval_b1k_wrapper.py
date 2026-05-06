@@ -1397,6 +1397,134 @@ class B1KPolicyWrapper():
                     f"final_g22={current_action[22]:.3f}"
                 )
 
+        elif debug_mode == "eval_selected12_v15":
+            # [수정일: 2026-05-06]
+            # [목적]
+            # 12개 task 평가용 공통 action 후처리 모드.
+            # radio 전용 if / task별 if 없이 모든 task에 동일하게 적용한다.
+            #
+            # 현재까지 확인한 base mapping:
+            # action[0] = forward/back
+            # action[1] = yaw
+            # action[2] = lateral
+            #
+            # action mapping:
+            # 0~2   base velocity
+            # 3~6   torso/trunk
+            # 7~13  left arm
+            # 14    left gripper
+            # 15~21 right arm
+            # 22    right gripper
+
+            raw_action = current_action.copy()
+
+            # ----------------------------
+            # 1) base stabilization
+            # ----------------------------
+            forward_axis = int(os.environ.get("B1K_FORWARD_AXIS", "0"))
+            yaw_axis = int(os.environ.get("B1K_YAW_AXIS", "1"))
+            lateral_axis = int(os.environ.get("B1K_LATERAL_AXIS", "2"))
+
+            forward_scale = float(os.environ.get("B1K_FORWARD_SCALE", "0.26"))
+            forward_max = float(os.environ.get("B1K_FORWARD_MAX", "0.20"))
+
+            yaw_scale = float(os.environ.get("B1K_YAW_SCALE", "0.025"))
+            yaw_max = float(os.environ.get("B1K_YAW_MAX", "0.018"))
+
+            lateral_scale = float(os.environ.get("B1K_LATERAL_SCALE", "0.18"))
+            lateral_max = float(os.environ.get("B1K_LATERAL_MAX", "0.10"))
+
+            planar_max = float(os.environ.get("B1K_PLANAR_MAX", "0.24"))
+
+            base = np.zeros(3, dtype=np.float32)
+
+            base[forward_axis] = np.clip(
+                raw_action[forward_axis] * forward_scale,
+                -forward_max,
+                forward_max,
+            )
+
+            base[yaw_axis] = np.clip(
+                raw_action[yaw_axis] * yaw_scale,
+                -yaw_max,
+                yaw_max,
+            )
+
+            base[lateral_axis] = np.clip(
+                raw_action[lateral_axis] * lateral_scale,
+                -lateral_max,
+                lateral_max,
+            )
+
+            planar_norm = np.linalg.norm([base[forward_axis], base[lateral_axis]])
+            planar_scale = np.minimum(1.0, planar_max / (planar_norm + 1e-6))
+            base[forward_axis] *= planar_scale
+            base[lateral_axis] *= planar_scale
+
+            last_base = getattr(self, "_selected12_v15_last_base", np.zeros(3, dtype=np.float32))
+            base = 0.72 * last_base + 0.28 * base
+            self._selected12_v15_last_base = base.copy()
+
+            current_action[0:3] = base
+
+            # ----------------------------
+            # 2) torso/trunk stabilization
+            # ----------------------------
+            current_action[3:7] = np.clip(raw_action[3:7] * 0.04, -0.08, 0.08)
+
+            # ----------------------------
+            # 3) arm activation
+            # ----------------------------
+            arm_scale = float(os.environ.get("B1K_ARM_SCALE", "1.60"))
+            arm_clip = float(os.environ.get("B1K_ARM_CLIP", "1.40"))
+
+            left_arm_gain = float(os.environ.get("B1K_LEFT_ARM_GAIN", "1.10"))
+            right_arm_gain = float(os.environ.get("B1K_RIGHT_ARM_GAIN", "1.40"))
+
+            current_action[7:14] = np.clip(
+                raw_action[7:14] * arm_scale * left_arm_gain,
+                -arm_clip,
+                arm_clip,
+            )
+
+            current_action[15:22] = np.clip(
+                raw_action[15:22] * arm_scale * right_arm_gain,
+                -arm_clip,
+                arm_clip,
+            )
+
+            # ----------------------------
+            # 4) gripper activation
+            # ----------------------------
+            gripper_scale = float(os.environ.get("B1K_GRIPPER_SCALE", "3.00"))
+            gripper_max = float(os.environ.get("B1K_GRIPPER_MAX", "0.70"))
+            gripper_deadband = float(os.environ.get("B1K_GRIPPER_DEADBAND", "0.005"))
+
+            g14 = raw_action[14] * gripper_scale
+            g22 = raw_action[22] * gripper_scale
+
+            if abs(g14) < gripper_deadband:
+                g14 = 0.0
+            if abs(g22) < gripper_deadband:
+                g22 = 0.0
+
+            current_action[14] = np.clip(g14, -gripper_max, gripper_max)
+            current_action[22] = np.clip(g22, -gripper_max, gripper_max)
+
+            if self.step_count % 20 == 0:
+                logger.info(
+                    f"[eval_selected12_v15] "
+                    f"step={self.step_count}, "
+                    f"base=({current_action[0]:.3f}, {current_action[1]:.3f}, {current_action[2]:.3f}), "
+                    f"raw_base=({raw_action[0]:.3f}, {raw_action[1]:.3f}, {raw_action[2]:.3f}), "
+                    f"arm_scale={arm_scale:.2f}, "
+                    f"arm_clip={arm_clip:.2f}, "
+                    f"raw_g14={raw_action[14]:.3f}, "
+                    f"raw_g22={raw_action[22]:.3f}, "
+                    f"final_g14={current_action[14]:.3f}, "
+                    f"final_g22={current_action[22]:.3f}"
+                )
+
         elif debug_mode == "probe_sweep":
             # [수정일: 2026-04-29]
             # [디버그 목적]
