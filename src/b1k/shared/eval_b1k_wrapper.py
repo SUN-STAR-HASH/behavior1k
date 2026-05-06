@@ -42,6 +42,91 @@ logger = logging.getLogger(__name__)
 
 RESIZE_SIZE = 224
 
+# ============================================================
+# R1Pro 23D action mapping
+# ============================================================
+# b1k_policy.py의 state 구성 순서와 동일하게 맞춘다.
+# 0:3   base velocity
+# 3:7   torso/trunk 4D
+# 7:14  left arm 7D
+# 14    left gripper
+# 15:22 right arm 7D
+# 22    right gripper
+
+ACTION_DIM = 23
+
+BASE = slice(0, 3)
+TORSO = slice(3, 7)
+LEFT_ARM = slice(7, 14)
+LEFT_GRIPPER = 14
+RIGHT_ARM = slice(15, 22)
+RIGHT_GRIPPER = 22
+
+GRIPPER_OPEN_VALUE = 1.0
+GRIPPER_CLOSE_VALUE = -1.0
+GRIPPER_THRESHOLD = 0.25
+
+
+def _threshold_gripper_value(g: np.ndarray | float) -> np.ndarray:
+    """
+    Gripper output을 연속값 그대로 쓰지 않고 open/close로 이산화한다.
+
+    현재 repo의 correction_rules.py 기준:
+    -1.0 = closed
+     1.0 = open
+    """
+    return np.where(
+        g < -GRIPPER_THRESHOLD,
+        GRIPPER_CLOSE_VALUE,
+        np.where(g > GRIPPER_THRESHOLD, GRIPPER_OPEN_VALUE, GRIPPER_OPEN_VALUE),
+    )
+
+
+def postprocess_action_eval_stable_v6(action: np.ndarray) -> np.ndarray:
+    """
+    eval 전용 action 안정화 후처리.
+
+    목적:
+    1. base가 너무 커서 넘어지는 문제 방지
+    2. torso/trunk가 자세를 흔드는 문제 방지
+    3. arm은 너무 죽이지 않아서 radio/object interaction 가능하게 유지
+    4. left/right gripper를 각각 threshold 처리
+    """
+    a = np.asarray(action, dtype=np.float32).copy()
+
+    if a.shape[-1] < ACTION_DIM:
+        raise ValueError(f"Expected action dim >= {ACTION_DIM}, got shape={a.shape}")
+
+    # NaN / Inf 방어
+    a = np.nan_to_num(a, nan=0.0, posinf=1.0, neginf=-1.0)
+
+    raw = a.copy()
+
+    # ----------------------------
+    # 1) base velocity: 이동은 살리되 yaw는 매우 작게
+    # ----------------------------
+    a[..., 0] = np.clip(raw[..., 0] * 0.22, -0.18, 0.18)
+    a[..., 1] = np.clip(raw[..., 1] * 0.40, -0.30, 0.30)
+    a[..., 2] = np.clip(raw[..., 2] * 0.020, -0.018, 0.018)
+
+    # ----------------------------
+    # 2) torso/trunk: 자세 불안정 방지를 위해 약하게
+    # ----------------------------
+    a[..., TORSO] = np.clip(raw[..., TORSO] * 0.10, -0.20, 0.20)
+
+    # ----------------------------
+    # 3) arms: base보다 강하게 허용
+    # ----------------------------
+    a[..., LEFT_ARM] = np.clip(raw[..., LEFT_ARM] * 1.25, -1.20, 1.20)
+    a[..., RIGHT_ARM] = np.clip(raw[..., RIGHT_ARM] * 1.25, -1.20, 1.20)
+
+    # ----------------------------
+    # 4) grippers: left/right 둘 다 threshold 처리
+    # ----------------------------
+    a[..., LEFT_GRIPPER] = _threshold_gripper_value(raw[..., LEFT_GRIPPER])
+    a[..., RIGHT_GRIPPER] = _threshold_gripper_value(raw[..., RIGHT_GRIPPER])
+
+    return a
 
 @dataclasses.dataclass
 class B1KWrapperConfig:
@@ -57,9 +142,9 @@ class B1KWrapperConfig:
     #
     # 이 설정에서 로봇이 안 넘어지면,
     # 원인은 policy 자체보다는 compression/inpainting 설정일 가능성이 크다.
-    actions_to_execute: int = 12
-    actions_to_keep: int = 0
-    execute_in_n_steps: int = 12
+    actions_to_execute: int = 26
+    actions_to_keep: int = 4
+    execute_in_n_steps: int = 26
 
     history_len: int = 1
     votes_to_promote: int = 1
@@ -425,7 +510,7 @@ class B1KPolicyWrapper():
         # 이 코드는 성능 향상용이 아니라 원인 분리용 임시 safety filter다.
         current_action = current_action.copy()
 
-        debug_mode = os.environ.get("B1K_ACTION_DEBUG_MODE", "safe_clip")
+        debug_mode = os.environ.get("B1K_ACTION_DEBUG_MODE", "eval_stable_v6")
 
         if debug_mode == "zero_all":
             current_action[:] = 0.0
@@ -571,6 +656,747 @@ class B1KPolicyWrapper():
             # gripper는 완전 고정하지 않고 약하게만 허용
             current_action[22] = np.clip(current_action[22] * 0.15, -0.25, 0.25)
 
+        elif debug_mode == "eval_stable_v6":
+            # [수정일: 2026-05-06]
+            # [실험 목적]
+            # v5는 3:22를 한 덩어리로 처리하고 right gripper(22)만 약하게 허용했다.
+            # v6는 action mapping을 명시적으로 반영한다.
+            #
+            # 0~2   base velocity
+            # 3~6   torso/trunk
+            # 7~13  left arm
+            # 14    left gripper
+            # 15~21 right arm
+            # 22    right gripper
+            current_action = postprocess_action_eval_stable_v6(current_action)
+
+        elif debug_mode == "eval_radio_v7":
+            # [수정일: 2026-05-06]
+            # [실험 목적]
+            # v6에서는 gripper 14, 22를 threshold 처리했는데,
+            # 모델 출력 노이즈 때문에 gripper가 계속 open/close 반복하는 문제가 발생했다.
+            #
+            # turning_on_radio task는 물체를 집는 작업이 아니므로,
+            # 이번 v7에서는 양쪽 gripper를 완전히 고정한다.
+
+            raw_action = current_action.copy()
+
+            # 1) base 이동은 v5 수준으로 다시 살림
+            current_action[0] = np.clip(raw_action[0] * 0.25, -0.20, 0.20)
+            current_action[1] = np.clip(raw_action[1] * 0.60, -0.40, 0.40)
+
+            # yaw는 계속 작게. yaw가 크면 넘어지거나 빙글빙글 돌 가능성이 큼
+            current_action[2] = np.clip(raw_action[2] * 0.015, -0.012, 0.012)
+
+            # 2) torso/trunk는 자세 흔들림 방지를 위해 약하게
+            current_action[3:7] = np.clip(raw_action[3:7] * 0.10, -0.20, 0.20)
+
+            # 3) arm은 radio 조작을 위해 어느 정도 허용
+            current_action[7:14] = np.clip(raw_action[7:14] * 1.20, -1.20, 1.20)
+            current_action[15:22] = np.clip(raw_action[15:22] * 1.20, -1.20, 1.20)
+
+            # 4) 핵심 수정: 양쪽 gripper 완전 고정
+            # v6의 threshold 방식은 gripper open/close 진동을 유발했으므로 제거한다.
+            current_action[14] = 0.0
+            current_action[22] = 0.0
+
+        elif debug_mode == "eval_radio_nav_v8":
+            # [수정일: 2026-05-06]
+            # [목적]
+            # v6/v7에서 yaw를 너무 작게 제한해서 radio를 찾지 못하는 문제가 있었다.
+            # v8은 gripper를 완전히 고정하고, navigation 단계에서 base/yaw를 다시 살린다.
+            #
+            # action mapping:
+            # 0~2   base velocity
+            # 3~6   torso/trunk
+            # 7~13  left arm
+            # 14    left gripper
+            # 15~21 right arm
+            # 22    right gripper
+
+            raw_action = current_action.copy()
+
+            # ----------------------------
+            # 1) base navigation 강화
+            # ----------------------------
+            base = np.zeros(3, dtype=np.float32)
+
+            base[0] = np.clip(raw_action[0] * 0.32, -0.26, 0.26)
+            base[1] = np.clip(raw_action[1] * 0.75, -0.45, 0.45)
+            base[2] = np.clip(raw_action[2] * 0.08, -0.055, 0.055)
+
+            # base smoothing: 갑자기 흔들리거나 넘어지는 것 방지
+            if not hasattr(self, "_radio_v8_last_base"):
+                self._radio_v8_last_base = np.zeros(3, dtype=np.float32)
+
+            base = 0.65 * self._radio_v8_last_base + 0.35 * base
+            self._radio_v8_last_base = base.copy()
+
+            current_action[0:3] = base
+
+            # ----------------------------
+            # 2) torso/trunk는 약하게 유지
+            # ----------------------------
+            current_action[3:7] = np.clip(raw_action[3:7] * 0.08, -0.15, 0.15)
+
+            # ----------------------------
+            # 3) 초기 navigation 동안 arm은 줄임
+            # ----------------------------
+            nav_phase = self.step_count < 180
+
+            if nav_phase:
+                current_action[7:14] = np.clip(raw_action[7:14] * 0.25, -0.35, 0.35)
+                current_action[15:22] = np.clip(raw_action[15:22] * 0.25, -0.35, 0.35)
+            else:
+                current_action[7:14] = np.clip(raw_action[7:14] * 1.20, -1.20, 1.20)
+                current_action[15:22] = np.clip(raw_action[15:22] * 1.20, -1.20, 1.20)
+
+            # ----------------------------
+            # 4) gripper 완전 고정
+            # ----------------------------
+            current_action[14] = 0.0
+            current_action[22] = 0.0
+
+            if self.step_count % 20 == 0:
+                logger.info(
+                    f"[eval_radio_nav_v8] "
+                    f"step={self.step_count}, "
+                    f"nav_phase={nav_phase}, "
+                    f"base=({current_action[0]:.3f}, {current_action[1]:.3f}, {current_action[2]:.3f}), "
+                    f"raw_base=({raw_action[0]:.3f}, {raw_action[1]:.3f}, {raw_action[2]:.3f}), "
+                    f"g14={current_action[14]:.3f}, "
+                    f"g22={current_action[22]:.3f}"
+                )
+
+        elif debug_mode == "eval_radio_nav_v9":
+            # [수정일: 2026-05-06]
+            # [목적]
+            # v8은 radio를 찾는 데 성공했지만, 찾는 속도가 느리고 이후 넘어지는 문제가 있었다.
+            # v9는 base 이동은 조금 더 빠르게 만들되, lateral/yaw/arm을 안정화한다.
+            #
+            # action mapping:
+            # 0~2   base velocity
+            # 3~6   torso/trunk
+            # 7~13  left arm
+            # 14    left gripper
+            # 15~21 right arm
+            # 22    right gripper
+
+            raw_action = current_action.copy()
+
+            # ----------------------------
+            # 1) base navigation: 빠르지만 안정적으로
+            # ----------------------------
+            base = np.zeros(3, dtype=np.float32)
+
+            # forward는 v8보다 조금 살림
+            base[0] = np.clip(raw_action[0] * 0.42, -0.34, 0.34)
+
+            # lateral은 v8보다 줄임
+            # v8의 y clip ±0.45는 넘어짐을 유발할 가능성이 컸음
+            base[1] = np.clip(raw_action[1] * 0.50, -0.28, 0.28)
+
+            # yaw도 v8보다 줄임
+            # v8의 ±0.055는 회전 탐색은 됐지만 넘어질 위험이 컸음
+            base[2] = np.clip(raw_action[2] * 0.06, -0.038, 0.038)
+
+            # x/y 동시 이동이 너무 커지는 것을 방지
+            xy_norm = np.linalg.norm(base[0:2])
+            max_xy_norm = 0.34
+            if xy_norm > max_xy_norm:
+                base[0:2] = base[0:2] / (xy_norm + 1e-6) * max_xy_norm
+
+            # 초반에는 조금 더 빠르게 찾고,
+            # 후반에는 팔 조작을 위해 base를 줄인다.
+            if self.step_count < 240:
+                base[0:3] *= 1.10
+            elif self.step_count < 360:
+                base[0:3] *= 0.75
+            else:
+                base[0:3] *= 0.45
+
+            # base smoothing 강화
+            if self.step_count == 0 or not hasattr(self, "_radio_v9_last_base"):
+                self._radio_v9_last_base = np.zeros(3, dtype=np.float32)
+
+            base = 0.78 * self._radio_v9_last_base + 0.22 * base
+            self._radio_v9_last_base = base.copy()
+
+            current_action[0:3] = base
+
+            # ----------------------------
+            # 2) torso/trunk는 더 약하게
+            # ----------------------------
+            current_action[3:7] = np.clip(raw_action[3:7] * 0.05, -0.10, 0.10)
+
+            # ----------------------------
+            # 3) arm은 늦게, 천천히 풀기
+            # ----------------------------
+            if self.step_count < 300:
+                arm_scale = 0.20
+                arm_clip = 0.30
+            elif self.step_count < 420:
+                arm_scale = 0.55
+                arm_clip = 0.65
+            else:
+                arm_scale = 0.85
+                arm_clip = 0.90
+
+            current_action[7:14] = np.clip(raw_action[7:14] * arm_scale, -arm_clip, arm_clip)
+            current_action[15:22] = np.clip(raw_action[15:22] * arm_scale, -arm_clip, arm_clip)
+
+            # ----------------------------
+            # 4) gripper 완전 고정
+            # ----------------------------
+            current_action[14] = 0.0
+            current_action[22] = 0.0
+
+            if self.step_count % 20 == 0:
+                logger.info(
+                    f"[eval_radio_nav_v9] "
+                    f"step={self.step_count}, "
+                    f"base=({current_action[0]:.3f}, {current_action[1]:.3f}, {current_action[2]:.3f}), "
+                    f"raw_base=({raw_action[0]:.3f}, {raw_action[1]:.3f}, {raw_action[2]:.3f}), "
+                    f"arm_scale={arm_scale:.2f}, "
+                    f"g14={current_action[14]:.3f}, "
+                    f"g22={current_action[22]:.3f}"
+                )
+
+        elif debug_mode == "eval_radio_nav_v10":
+            # [수정일: 2026-05-06]
+            # [목적]
+            # v8은 radio를 찾았지만 넘어졌고, v9은 너무 느려져서 radio를 못 찾았다.
+            # v10은 v8의 탐색 능력을 다시 살리되, lateral/yaw/arm을 단계적으로 제한한다.
+            #
+            # action mapping:
+            # 0~2   base velocity
+            # 3~6   torso/trunk
+            # 7~13  left arm
+            # 14    left gripper
+            # 15~21 right arm
+            # 22    right gripper
+
+            raw_action = current_action.copy()
+
+            # ----------------------------
+            # 1) base navigation
+            # ----------------------------
+            base = np.zeros(3, dtype=np.float32)
+
+            # v8보다 forward는 조금 더 빠르게
+            base[0] = np.clip(raw_action[0] * 0.45, -0.36, 0.36)
+
+            # v9은 y가 너무 작아서 탐색이 죽었음
+            # v8보다는 작고, v9보다는 크게
+            base[1] = np.clip(raw_action[1] * 0.68, -0.38, 0.38)
+
+            # yaw도 v9보다 다시 살림
+            # v8 수준에 가깝게 하되, clip은 약간만 줄임
+            base[2] = np.clip(raw_action[2] * 0.085, -0.052, 0.052)
+
+            # x/y 동시 이동이 너무 커지는 것 방지
+            xy_norm = np.linalg.norm(base[0:2])
+            max_xy_norm = 0.42
+            if xy_norm > max_xy_norm:
+                base[0:2] = base[0:2] / (xy_norm + 1e-6) * max_xy_norm
+
+            # 단계별 속도 조절
+            # 초반: 라디오 찾기 위해 적극 이동
+            # 중반: 접근 유지
+            # 후반: 넘어짐 방지를 위해 감속
+            if self.step_count < 220:
+                base[0:3] *= 1.15
+            elif self.step_count < 360:
+                base[0:3] *= 0.95
+            else:
+                base[0:3] *= 0.60
+
+            # smoothing은 v9보다 약하게 해서 반응성을 살림
+            if self.step_count == 0 or not hasattr(self, "_radio_v10_last_base"):
+                self._radio_v10_last_base = np.zeros(3, dtype=np.float32)
+
+            if self.step_count < 260:
+                smooth_prev = 0.55
+                smooth_new = 0.45
+            else:
+                smooth_prev = 0.70
+                smooth_new = 0.30
+
+            base = smooth_prev * self._radio_v10_last_base + smooth_new * base
+            self._radio_v10_last_base = base.copy()
+
+            current_action[0:3] = base
+
+            # ----------------------------
+            # 2) torso/trunk 안정화
+            # ----------------------------
+            current_action[3:7] = np.clip(raw_action[3:7] * 0.06, -0.12, 0.12)
+
+            # ----------------------------
+            # 3) arm은 너무 늦게 풀지 않되, 급격히 풀지 않음
+            # ----------------------------
+            if self.step_count < 240:
+                arm_scale = 0.18
+                arm_clip = 0.28
+            elif self.step_count < 360:
+                arm_scale = 0.45
+                arm_clip = 0.55
+            else:
+                arm_scale = 0.75
+                arm_clip = 0.80
+
+            current_action[7:14] = np.clip(raw_action[7:14] * arm_scale, -arm_clip, arm_clip)
+            current_action[15:22] = np.clip(raw_action[15:22] * arm_scale, -arm_clip, arm_clip)
+
+            # ----------------------------
+            # 4) gripper 고정
+            # ----------------------------
+            current_action[14] = 0.0
+            current_action[22] = 0.0
+
+            if self.step_count % 20 == 0:
+                logger.info(
+                    f"[eval_radio_nav_v10] "
+                    f"step={self.step_count}, "
+                    f"base=({current_action[0]:.3f}, {current_action[1]:.3f}, {current_action[2]:.3f}), "
+                    f"raw_base=({raw_action[0]:.3f}, {raw_action[1]:.3f}, {raw_action[2]:.3f}), "
+                    f"arm_scale={arm_scale:.2f}, "
+                    f"g14={current_action[14]:.3f}, "
+                    f"g22={current_action[22]:.3f}"
+                )
+
+        elif debug_mode == "eval_radio_approach_v11":
+            # [수정일: 2026-05-06]
+            # [목적]
+            # radio task 전용 if / phase 분기를 제거한 일반 action 후처리 모드.
+            # 모든 task에 같은 방식으로 적용된다.
+            #
+            # action mapping:
+            # 0~2   base velocity
+            # 3~6   torso/trunk
+            # 7~13  left arm
+            # 14    left gripper
+            # 15~21 right arm
+            # 22    right gripper
+
+            raw_action = current_action.copy()
+
+            # ----------------------------
+            # tunable parameters
+            # ----------------------------
+            # 가정:
+            # action[0] = forward/back
+            # action[1] = yaw
+            # action[2] = lateral
+            forward_axis = int(os.environ.get("B1K_FORWARD_AXIS", "0"))
+            yaw_axis = int(os.environ.get("B1K_YAW_AXIS", "1"))
+            lateral_axis = int(os.environ.get("B1K_LATERAL_AXIS", "2"))
+
+            forward_sign = float(os.environ.get("B1K_FORWARD_SIGN", "1.0"))
+            forward_bias = float(os.environ.get("B1K_FORWARD_BIAS", "0.08"))
+
+            forward_scale = float(os.environ.get("B1K_FORWARD_SCALE", "0.34"))
+            yaw_scale = float(os.environ.get("B1K_YAW_SCALE", "0.035"))
+            lateral_scale = float(os.environ.get("B1K_LATERAL_SCALE", "0.28"))
+
+            forward_max = float(os.environ.get("B1K_FORWARD_MAX", "0.28"))
+            yaw_max = float(os.environ.get("B1K_YAW_MAX", "0.025"))
+            lateral_max = float(os.environ.get("B1K_LATERAL_MAX", "0.18"))
+            planar_max = float(os.environ.get("B1K_PLANAR_MAX", "0.32"))
+
+            ramp_start = float(os.environ.get("B1K_FORWARD_RAMP_START", "180"))
+            ramp_len = float(os.environ.get("B1K_FORWARD_RAMP_LEN", "140"))
+
+            # step 기반 ramp. task-specific if 없이 0~1로 부드럽게 증가.
+            ramp = np.clip((float(self.step_count) - ramp_start) / (ramp_len + 1e-6), 0.0, 1.0)
+
+            # ----------------------------
+            # 1) base navigation
+            # ----------------------------
+            base = np.zeros(3, dtype=np.float32)
+
+            # forward/back
+            base[forward_axis] = np.clip(
+                raw_action[forward_axis] * forward_scale + forward_sign * forward_bias * ramp,
+                -forward_max,
+                forward_max,
+            )
+
+            # yaw는 작게 제한. 기존 코드에서 action[1]을 크게 살린 게 넘어짐 원인일 수 있음.
+            base[yaw_axis] = np.clip(
+                raw_action[yaw_axis] * yaw_scale,
+                -yaw_max,
+                yaw_max,
+            )
+
+            # lateral은 허용하되 작게 제한
+            base[lateral_axis] = np.clip(
+                raw_action[lateral_axis] * lateral_scale,
+                -lateral_max,
+                lateral_max,
+            )
+
+            # forward + lateral 평면 속도 제한
+            planar_norm = np.linalg.norm([base[forward_axis], base[lateral_axis]])
+            planar_scale = np.minimum(1.0, planar_max / (planar_norm + 1e-6))
+            base[forward_axis] *= planar_scale
+            base[lateral_axis] *= planar_scale
+
+            # smoothing. if문 없이 getattr 기본값 사용.
+            last_base = getattr(self, "_general_v12_last_base", np.zeros(3, dtype=np.float32))
+            base = 0.62 * last_base + 0.38 * base
+            self._general_v12_last_base = base.copy()
+
+            current_action[0:3] = base
+
+            # ----------------------------
+            # 2) torso/trunk 안정화
+            # ----------------------------
+            current_action[3:7] = np.clip(raw_action[3:7] * 0.05, -0.10, 0.10)
+
+            # ----------------------------
+            # 3) arm도 if 없이 ramp로 천천히 풀기
+            # ----------------------------
+            arm_ramp = np.clip((float(self.step_count) - 260.0) / 220.0, 0.0, 1.0)
+
+            arm_scale = 0.18 + 0.57 * arm_ramp
+            arm_clip = 0.28 + 0.52 * arm_ramp
+
+            current_action[7:14] = np.clip(raw_action[7:14] * arm_scale, -arm_clip, arm_clip)
+            current_action[15:22] = np.clip(raw_action[15:22] * arm_scale, -arm_clip, arm_clip)
+
+            # ----------------------------
+            # 4) gripper 고정
+            # ----------------------------
+            current_action[14] = 0.0
+            current_action[22] = 0.0
+
+            logger.info(
+                f"[eval_general_forward_v12] "
+                f"step={self.step_count}, "
+                f"ramp={ramp:.3f}, "
+                f"base=({current_action[0]:.3f}, {current_action[1]:.3f}, {current_action[2]:.3f}), "
+                f"raw_base=({raw_action[0]:.3f}, {raw_action[1]:.3f}, {raw_action[2]:.3f}), "
+                f"forward_axis={forward_axis}, "
+                f"forward_sign={forward_sign:.1f}, "
+                f"forward_bias={forward_bias:.3f}, "
+                f"arm_scale={arm_scale:.2f}, "
+                f"g14={current_action[14]:.3f}, "
+                f"g22={current_action[22]:.3f}"
+            )
+
+        elif debug_mode == "eval_reach_grip_v13":
+            # [수정일: 2026-05-06]
+            # [목적]
+            # 전진축은 action[0]으로 확정된 상황에서,
+            # 전진 bias는 줄이고, radio 근처에서 팔을 단계적으로 풀고,
+            # gripper를 open -> close -> open 형태로 한 번 동작시킨다.
+            #
+            # 현재 가정:
+            # action[0] = forward/back
+            # action[1] = yaw
+            # action[2] = lateral
+            #
+            # action mapping:
+            # 0~2   base velocity
+            # 3~6   torso/trunk
+            # 7~13  left arm
+            # 14    left gripper
+            # 15~21 right arm
+            # 22    right gripper
+
+            raw_action = current_action.copy()
+
+            # ----------------------------
+            # tunable parameters
+            # ----------------------------
+            forward_axis = int(os.environ.get("B1K_FORWARD_AXIS", "0"))
+            yaw_axis = int(os.environ.get("B1K_YAW_AXIS", "1"))
+            lateral_axis = int(os.environ.get("B1K_LATERAL_AXIS", "2"))
+
+            forward_sign = float(os.environ.get("B1K_FORWARD_SIGN", "1.0"))
+
+            # 전진은 맞았으니 기존보다 약하게
+            forward_bias = float(os.environ.get("B1K_FORWARD_BIAS", "0.06"))
+            forward_scale = float(os.environ.get("B1K_FORWARD_SCALE", "0.30"))
+            forward_max = float(os.environ.get("B1K_FORWARD_MAX", "0.24"))
+
+            yaw_scale = float(os.environ.get("B1K_YAW_SCALE", "0.030"))
+            yaw_max = float(os.environ.get("B1K_YAW_MAX", "0.020"))
+
+            lateral_scale = float(os.environ.get("B1K_LATERAL_SCALE", "0.22"))
+            lateral_max = float(os.environ.get("B1K_LATERAL_MAX", "0.14"))
+
+            planar_max = float(os.environ.get("B1K_PLANAR_MAX", "0.28"))
+
+            forward_ramp_start = float(os.environ.get("B1K_FORWARD_RAMP_START", "180"))
+            forward_ramp_len = float(os.environ.get("B1K_FORWARD_RAMP_LEN", "140"))
+
+            # 팔을 풀기 시작하는 시점
+            reach_start = float(os.environ.get("B1K_REACH_START", "260"))
+            reach_len = float(os.environ.get("B1K_REACH_LEN", "180"))
+
+            # gripper 동작 시점
+            grip_close_start = float(os.environ.get("B1K_GRIP_CLOSE_START", "360"))
+            grip_open_start = float(os.environ.get("B1K_GRIP_OPEN_START", "520"))
+            grip_ramp_len = float(os.environ.get("B1K_GRIP_RAMP_LEN", "60"))
+
+            # gripper command 값
+            # 방향이 반대면 A100 실행 시 OPEN/CLOSE 값을 서로 바꾸면 된다.
+            gripper_open_cmd = float(os.environ.get("B1K_GRIPPER_OPEN", "0.25"))
+            gripper_close_cmd = float(os.environ.get("B1K_GRIPPER_CLOSE", "-0.35"))
+
+            # arm gain
+            left_arm_gain = float(os.environ.get("B1K_LEFT_ARM_GAIN", "0.85"))
+            right_arm_gain = float(os.environ.get("B1K_RIGHT_ARM_GAIN", "1.15"))
+
+            # ----------------------------
+            # 1) base navigation
+            # ----------------------------
+            base = np.zeros(3, dtype=np.float32)
+
+            forward_ramp = np.clip(
+                (float(self.step_count) - forward_ramp_start) / (forward_ramp_len + 1e-6),
+                0.0,
+                1.0,
+            )
+
+            base[forward_axis] = np.clip(
+                raw_action[forward_axis] * forward_scale + forward_sign * forward_bias * forward_ramp,
+                -forward_max,
+                forward_max,
+            )
+
+            base[yaw_axis] = np.clip(
+                raw_action[yaw_axis] * yaw_scale,
+                -yaw_max,
+                yaw_max,
+            )
+
+            base[lateral_axis] = np.clip(
+                raw_action[lateral_axis] * lateral_scale,
+                -lateral_max,
+                lateral_max,
+            )
+
+            planar_norm = np.linalg.norm([base[forward_axis], base[lateral_axis]])
+            planar_scale = np.minimum(1.0, planar_max / (planar_norm + 1e-6))
+            base[forward_axis] *= planar_scale
+            base[lateral_axis] *= planar_scale
+
+            last_base = getattr(self, "_reach_grip_v13_last_base", np.zeros(3, dtype=np.float32))
+            base = 0.70 * last_base + 0.30 * base
+            self._reach_grip_v13_last_base = base.copy()
+
+            current_action[0:3] = base
+
+            # ----------------------------
+            # 2) torso/trunk 안정화
+            # ----------------------------
+            current_action[3:7] = np.clip(raw_action[3:7] * 0.04, -0.08, 0.08)
+
+            # ----------------------------
+            # 3) arm을 단계적으로 풀기
+            # ----------------------------
+            reach_ramp = np.clip(
+                (float(self.step_count) - reach_start) / (reach_len + 1e-6),
+                0.0,
+                1.0,
+            )
+
+            # 초반에는 0.20 수준, reach 이후에는 1.05까지 증가
+            arm_scale = 0.20 + 0.85 * reach_ramp
+            arm_clip = 0.30 + 0.70 * reach_ramp
+
+            current_action[7:14] = np.clip(
+                raw_action[7:14] * arm_scale * left_arm_gain,
+                -arm_clip,
+                arm_clip,
+            )
+
+            current_action[15:22] = np.clip(
+                raw_action[15:22] * arm_scale * right_arm_gain,
+                -arm_clip,
+                arm_clip,
+            )
+
+            # ----------------------------
+            # 4) gripper open -> close -> open
+            # ----------------------------
+            close_gate = np.clip(
+                (float(self.step_count) - grip_close_start) / (grip_ramp_len + 1e-6),
+                0.0,
+                1.0,
+            )
+
+            reopen_gate = np.clip(
+                (float(self.step_count) - grip_open_start) / (grip_ramp_len + 1e-6),
+                0.0,
+                1.0,
+            )
+
+            # close_gate가 1이면 close, reopen_gate가 1이면 다시 open
+            grip_gate = close_gate * (1.0 - reopen_gate)
+
+            gripper_cmd = gripper_open_cmd * (1.0 - grip_gate) + gripper_close_cmd * grip_gate
+
+            current_action[14] = gripper_cmd
+            current_action[22] = gripper_cmd
+
+            if self.step_count % 20 == 0:
+                logger.info(
+                    f"[eval_reach_grip_v13] "
+                    f"step={self.step_count}, "
+                    f"forward_ramp={forward_ramp:.3f}, "
+                    f"reach_ramp={reach_ramp:.3f}, "
+                    f"grip_gate={grip_gate:.3f}, "
+                    f"base=({current_action[0]:.3f}, {current_action[1]:.3f}, {current_action[2]:.3f}), "
+                    f"raw_base=({raw_action[0]:.3f}, {raw_action[1]:.3f}, {raw_action[2]:.3f}), "
+                    f"arm_scale={arm_scale:.2f}, "
+                    f"arm_clip={arm_clip:.2f}, "
+                    f"gripper_cmd={gripper_cmd:.3f}"
+                )
+
+        elif debug_mode == "eval_arm_gripper_v14":
+            # [수정일: 2026-05-06]
+            # [목적]
+            # v13에서는 팔/그리퍼를 너무 늦게 풀어서 실제 움직임이 거의 없었다.
+            # v14는 팔을 초반부터 바로 활성화하고, gripper 고정을 제거한다.
+            #
+            # 현재 확인된 base mapping:
+            # action[0] = forward/back
+            # action[1] = yaw
+            # action[2] = lateral
+            #
+            # action mapping:
+            # 0~2   base velocity
+            # 3~6   torso/trunk
+            # 7~13  left arm
+            # 14    left gripper
+            # 15~21 right arm
+            # 22    right gripper
+
+            raw_action = current_action.copy()
+
+            # ----------------------------
+            # 1) base: 전진은 맞으므로 약하게 유지
+            # ----------------------------
+            forward_axis = int(os.environ.get("B1K_FORWARD_AXIS", "0"))
+            yaw_axis = int(os.environ.get("B1K_YAW_AXIS", "1"))
+            lateral_axis = int(os.environ.get("B1K_LATERAL_AXIS", "2"))
+
+            forward_sign = float(os.environ.get("B1K_FORWARD_SIGN", "1.0"))
+
+            forward_bias = float(os.environ.get("B1K_FORWARD_BIAS", "0.04"))
+            forward_scale = float(os.environ.get("B1K_FORWARD_SCALE", "0.28"))
+            forward_max = float(os.environ.get("B1K_FORWARD_MAX", "0.22"))
+
+            yaw_scale = float(os.environ.get("B1K_YAW_SCALE", "0.025"))
+            yaw_max = float(os.environ.get("B1K_YAW_MAX", "0.018"))
+
+            lateral_scale = float(os.environ.get("B1K_LATERAL_SCALE", "0.20"))
+            lateral_max = float(os.environ.get("B1K_LATERAL_MAX", "0.12"))
+
+            planar_max = float(os.environ.get("B1K_PLANAR_MAX", "0.26"))
+
+            forward_ramp_start = float(os.environ.get("B1K_FORWARD_RAMP_START", "160"))
+            forward_ramp_len = float(os.environ.get("B1K_FORWARD_RAMP_LEN", "120"))
+
+            forward_ramp = np.clip(
+                (float(self.step_count) - forward_ramp_start) / (forward_ramp_len + 1e-6),
+                0.0,
+                1.0,
+            )
+
+            base = np.zeros(3, dtype=np.float32)
+
+            base[forward_axis] = np.clip(
+                raw_action[forward_axis] * forward_scale + forward_sign * forward_bias * forward_ramp,
+                -forward_max,
+                forward_max,
+            )
+
+            base[yaw_axis] = np.clip(
+                raw_action[yaw_axis] * yaw_scale,
+                -yaw_max,
+                yaw_max,
+            )
+
+            base[lateral_axis] = np.clip(
+                raw_action[lateral_axis] * lateral_scale,
+                -lateral_max,
+                lateral_max,
+            )
+
+            planar_norm = np.linalg.norm([base[forward_axis], base[lateral_axis]])
+            planar_scale = np.minimum(1.0, planar_max / (planar_norm + 1e-6))
+            base[forward_axis] *= planar_scale
+            base[lateral_axis] *= planar_scale
+
+            last_base = getattr(self, "_arm_gripper_v14_last_base", np.zeros(3, dtype=np.float32))
+            base = 0.72 * last_base + 0.28 * base
+            self._arm_gripper_v14_last_base = base.copy()
+
+            current_action[0:3] = base
+
+            # ----------------------------
+            # 2) torso/trunk: 넘어짐 방지용으로 계속 작게
+            # ----------------------------
+            current_action[3:7] = np.clip(raw_action[3:7] * 0.04, -0.08, 0.08)
+
+            # ----------------------------
+            # 3) arm: 초반부터 바로 활성화
+            # ----------------------------
+            arm_scale = float(os.environ.get("B1K_ARM_SCALE", "1.15"))
+            arm_clip = float(os.environ.get("B1K_ARM_CLIP", "1.10"))
+
+            left_arm_gain = float(os.environ.get("B1K_LEFT_ARM_GAIN", "1.00"))
+            right_arm_gain = float(os.environ.get("B1K_RIGHT_ARM_GAIN", "1.25"))
+
+            current_action[7:14] = np.clip(
+                raw_action[7:14] * arm_scale * left_arm_gain,
+                -arm_clip,
+                arm_clip,
+            )
+
+            current_action[15:22] = np.clip(
+                raw_action[15:22] * arm_scale * right_arm_gain,
+                -arm_clip,
+                arm_clip,
+            )
+
+            # ----------------------------
+            # 4) gripper: 고정 제거, 모델 출력 증폭
+            # ----------------------------
+            gripper_scale = float(os.environ.get("B1K_GRIPPER_SCALE", "2.50"))
+            gripper_max = float(os.environ.get("B1K_GRIPPER_MAX", "0.60"))
+            gripper_deadband = float(os.environ.get("B1K_GRIPPER_DEADBAND", "0.02"))
+
+            g14 = raw_action[14] * gripper_scale
+            g22 = raw_action[22] * gripper_scale
+
+            if abs(g14) < gripper_deadband:
+                g14 = 0.0
+            if abs(g22) < gripper_deadband:
+                g22 = 0.0
+
+            current_action[14] = np.clip(g14, -gripper_max, gripper_max)
+            current_action[22] = np.clip(g22, -gripper_max, gripper_max)
+
+            if self.step_count % 20 == 0:
+                logger.info(
+                    f"[eval_arm_gripper_v14] "
+                    f"step={self.step_count}, "
+                    f"base=({current_action[0]:.3f}, {current_action[1]:.3f}, {current_action[2]:.3f}), "
+                    f"raw_base=({raw_action[0]:.3f}, {raw_action[1]:.3f}, {raw_action[2]:.3f}), "
+                    f"arm_scale={arm_scale:.2f}, "
+                    f"arm_clip={arm_clip:.2f}, "
+                    f"raw_g14={raw_action[14]:.3f}, "
+                    f"raw_g22={raw_action[22]:.3f}, "
+                    f"final_g14={current_action[14]:.3f}, "
+                    f"final_g22={current_action[22]:.3f}"
+                )
+
         elif debug_mode == "probe_sweep":
             # [수정일: 2026-04-29]
             # [디버그 목적]
@@ -592,6 +1418,7 @@ class B1KPolicyWrapper():
             #
             # 영상에서 어느 index일 때 wrist camera / arm / base / gripper가
             # 움직이는지 확인하기 위한 디버그 모드다.
+
             current_action[:] = 0.0
 
             probe_start = int(os.environ.get("B1K_PROBE_START", "3"))
@@ -603,7 +1430,6 @@ class B1KPolicyWrapper():
             probe_slot = (self.step_count // probe_interval) % num_probe_channels
             probe_index = probe_start + probe_slot
 
-            # interval 절반은 +방향, 절반은 -방향으로 줘서 움직임을 보기 쉽게 한다.
             phase = self.step_count % probe_interval
             sign = 1.0 if phase < (probe_interval // 2) else -1.0
 
@@ -639,11 +1465,13 @@ class B1KPolicyWrapper():
                 f"raw_mid_min={raw_action[3:-1].min():.4f}, "
                 f"raw_mid_max={raw_action[3:-1].max():.4f}, "
                 f"raw_mid_mean={raw_action[3:-1].mean():.4f}, "
-                f"raw_gripper={raw_action[-1]:.4f}, "
+                f"raw_left_gripper={raw_action[LEFT_GRIPPER]:.4f}, "
+                f"raw_right_gripper={raw_action[RIGHT_GRIPPER]:.4f}, "
                 f"final_base={current_action[:3]}, "
                 f"final_mid_min={current_action[3:-1].min():.4f}, "
                 f"final_mid_max={current_action[3:-1].max():.4f}, "
-                f"final_gripper={current_action[-1]:.4f}"
+                f"final_left_gripper={current_action[LEFT_GRIPPER]:.4f}, "
+                f"final_right_gripper={current_action[RIGHT_GRIPPER]:.4f}"
             )
 
         self.action_index += 1
