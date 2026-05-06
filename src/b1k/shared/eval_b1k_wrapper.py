@@ -142,9 +142,9 @@ class B1KWrapperConfig:
     #
     # 이 설정에서 로봇이 안 넘어지면,
     # 원인은 policy 자체보다는 compression/inpainting 설정일 가능성이 크다.
-    actions_to_execute: int = 26
-    actions_to_keep: int = 4
-    execute_in_n_steps: int = 26
+    actions_to_execute: int = 20
+    actions_to_keep: int = 0
+    execute_in_n_steps: int = 20
 
     history_len: int = 1
     votes_to_promote: int = 1
