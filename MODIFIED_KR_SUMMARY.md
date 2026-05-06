@@ -4,6 +4,39 @@
 
 새 작업은 항상 이 파일의 위쪽에 추가하고, 예전 작업 기록은 지우지 않는다.
 
+## 2026-05-06 10k week config 제거
+
+### 배경
+
+- 실제 baseline 학습은 `70_000 step`으로 완료했고, A100 한 장에서 1주일 이내 학습 가능하다는 것을 확인했다.
+- 70k가 12개 task 전체 episode 중 약 10%를 보는 기준이므로, stage tracking 비교도 같은 70k 조건으로 맞추는 것이 맞다.
+- 따라서 빠른 확인용으로 만들었던 `10k week` 계열 config는 제거했다.
+
+### 제거한 config
+
+- `pi_behavior_b1k_a100_week`
+- `pi_behavior_b1k_a100_week_stage`
+
+### 현재 사용할 config
+
+- 순수 task embedding + flow matching 70k baseline:
+  `pi_behavior_b1k_a100_baseline_draft`
+- System 2 stage tracking 70k 재학습:
+  `pi_behavior_b1k_a100_baseline_stage_draft`
+
+실행 명령:
+
+```bash
+uv run scripts/compute_norm_stats.py --config-name pi_behavior_b1k_a100_baseline_stage_draft
+uv run scripts/train.py pi_behavior_b1k_a100_baseline_stage_draft --overwrite
+```
+
+정리:
+
+- 현재 비교 축은 `70k baseline` vs `70k stage tracking`이다.
+- 10k config는 더 이상 코드에 남기지 않는다.
+- 아래 과거 기록에 보이는 10k 관련 내용은 당시 실험 설계 기록이며, 현재 실행 기준은 아니다.
+
 ## 2026-05-06 70k stage tracking 재학습 기준 정리
 
 ### 배경
