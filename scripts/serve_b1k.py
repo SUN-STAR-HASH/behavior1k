@@ -64,7 +64,7 @@ class Args:
     tyro를 쓰기 때문에 아래 dataclass 필드들이 자동으로 CLI 옵션이 된다.
     예:
         uv run scripts/serve_b1k.py policy:checkpoint \
-            --policy.config pi_behavior_b1k_a100_week_stage \
+            --policy.config pi_behavior_b1k_a100_baseline_stage_draft \
             --policy.dir ~/models/checkpoint_1 \
             --port 8000
     """

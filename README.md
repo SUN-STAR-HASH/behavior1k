@@ -11,7 +11,8 @@ task별 checkpoint switching을 지원합니다.
 
 ## 개요
 
-현재 A100 1주 실험용 기본 추천 config는 `pi_behavior_b1k_a100_week_stage`입니다.
+현재 A100 재학습 기본 추천 config는 `pi_behavior_b1k_a100_baseline_stage_draft`입니다.
+이 config는 기존 70k baseline과 같은 step / batch 조건에서 System 2 stage tracking만 추가합니다.
 
 주요 특징은 다음과 같습니다.
 
@@ -21,7 +22,7 @@ task별 checkpoint switching을 지원합니다.
 - 3-view RGB 이미지와 robot proprioception 사용
 - Pi0.5 backbone + task embedding + flow matching baseline 유지
 - System 2 stage prediction / stage-conditioned token 지원
-- A100 단일 GPU에서 1주 이내 실험을 목표로 한 축소 학습 config 제공
+- A100 단일 GPU에서 검증된 70k baseline 조건과 빠른 10k 점검 config를 함께 제공
 - BEHAVIOR task id별 checkpoint switching 지원
 
 ## 저장소 구조
@@ -115,58 +116,56 @@ checkpoint_base_dir="./outputs/checkpoints"
 학습 전에 normalization statistics를 계산해야 합니다.
 
 ```bash
-uv run scripts/compute_norm_stats.py --config-name pi_behavior_b1k_a100_week_stage
+uv run scripts/compute_norm_stats.py --config-name pi_behavior_b1k_a100_baseline_stage_draft
 ```
 
 FAST tokenizer는 기본 stage config에서 사용하지 않습니다. 나중에 FAST auxiliary를 다시 켤 때만 학습합니다.
 
 ```bash
 uv run scripts/train_fast_tokenizer.py \
-  --config-name pi_behavior_b1k_a100_week_stage \
+  --config-name pi_behavior_b1k_a100_baseline_stage_draft \
   --encoded-dims="0:6,7:23" \
   --vocab-size=1024
 ```
 
 ## 학습
 
-A100 한 장으로 1주 이내 실험을 목표로 하는 stage tracking config입니다.
+이미 검증한 70k baseline 조건으로 stage tracking을 다시 학습하는 config입니다.
+기존 `baseline_70k` 평가 점수가 낮게 나온 뒤, task embedding만으로는 복잡한 장기 task를 충분히 구분하기 어렵다는 가설을 확인하기 위한 재학습 경로입니다.
 
 ```bash
-uv run scripts/train.py pi_behavior_b1k_a100_week_stage --overwrite
+uv run scripts/train.py pi_behavior_b1k_a100_baseline_stage_draft --overwrite
 ```
 
 기존 학습을 이어서 실행합니다.
 
 ```bash
-uv run scripts/train.py pi_behavior_b1k_a100_week_stage --resume
+uv run scripts/train.py pi_behavior_b1k_a100_baseline_stage_draft --resume
 ```
 
 기본 설정은 다음과 같습니다.
 
-- `num_train_steps=10000`
-- `batch_size=8`
+- `num_train_steps=70000`
+- `batch_size=28`
 - `fsdp_devices=1`
 - `save_interval=1000`
-- `keep_period=2000`
-- `log_interval=50`
+- `keep_period=5000`
+- `log_interval=10`
 - `num_flow_samples=1`
 - `subtask_loss_weight=0.1`
 
-처음 500~1000 step을 봤을 때 너무 느리면 step 수를 줄여 실행합니다.
+빠른 구조 확인만 하고 싶을 때는 10k week config를 사용할 수 있습니다.
 
 ```bash
 uv run scripts/train.py pi_behavior_b1k_a100_week_stage \
-  --num_train_steps=5000 \
-  --save_interval=500 \
-  --keep_period=1000 \
   --overwrite
 ```
 
-메모리가 안정적이고 GPU 사용률이 낮으면 batch size를 올려 볼 수 있습니다.
+메모리가 안정적이고 GPU 사용률이 낮으면 70k stage config에서 batch size를 올려 볼 수 있습니다.
 
 ```bash
-uv run scripts/train.py pi_behavior_b1k_a100_week_stage \
-  --batch_size=12 \
+uv run scripts/train.py pi_behavior_b1k_a100_baseline_stage_draft \
+  --batch_size=32 \
   --overwrite
 ```
 
@@ -192,7 +191,7 @@ uv run scripts/train.py pi_behavior_b1k_a100_baseline_stage_draft --overwrite
 Weights & Biases logging을 끄려면 다음 옵션을 사용합니다.
 
 ```bash
-uv run scripts/train.py pi_behavior_b1k_a100_week_stage --wandb_enabled=false
+uv run scripts/train.py pi_behavior_b1k_a100_baseline_stage_draft --wandb_enabled=false
 ```
 
 ## Policy Server 실행
@@ -202,7 +201,7 @@ uv run scripts/train.py pi_behavior_b1k_a100_week_stage --wandb_enabled=false
 ```bash
 uv run scripts/serve_b1k.py \
   policy:checkpoint \
-  --policy.config pi_behavior_b1k_a100_week_stage \
+  --policy.config pi_behavior_b1k_a100_baseline_stage_draft \
   --policy.dir /path/to/checkpoint
 ```
 
@@ -212,7 +211,7 @@ uv run scripts/serve_b1k.py \
 uv run scripts/serve_b1k.py \
   --port 8001 \
   policy:checkpoint \
-  --policy.config pi_behavior_b1k_a100_week_stage \
+  --policy.config pi_behavior_b1k_a100_baseline_stage_draft \
   --policy.dir /path/to/checkpoint
 ```
 
@@ -234,7 +233,7 @@ uv run scripts/serve_b1k.py \
 uv run scripts/serve_b1k.py \
   --task-checkpoint-mapping task_checkpoint_mapping.json \
   policy:checkpoint \
-  --policy.config pi_behavior_b1k_a100_week_stage \
+  --policy.config pi_behavior_b1k_a100_baseline_stage_draft \
   --policy.dir /path/to/initial/checkpoint
 ```
 

@@ -4,6 +4,51 @@
 
 새 작업은 항상 이 파일의 위쪽에 추가하고, 예전 작업 기록은 지우지 않는다.
 
+## 2026-05-06 70k stage tracking 재학습 기준 정리
+
+### 배경
+
+- 기존 `task embedding + flow matching` baseline은 `70_000 step`으로 학습했다.
+- 이 70k는 12개 task 전체 episode 중 약 10% 정도를 보는 실험 기준으로 잡은 값이다.
+- 실제 A100 학습 로그 기준으로 70k 학습이 1주일 이내에 가능하다는 것을 확인했다.
+- 평가 점수가 낮게 나와, 단순 task id embedding만으로는 복잡한 장기 task의 진행 단계를 충분히 표현하기 어렵다는 문제가 보였다.
+- 그래서 다음 재학습은 같은 70k 조건에서 System 2 stage tracking을 추가하는 방향으로 정리했다.
+
+### 현재 추천 config
+
+```bash
+pi_behavior_b1k_a100_baseline_stage_draft
+```
+
+이 config는 기존 70k baseline인 `pi_behavior_b1k_a100_baseline_draft`와 비교하기 위해 만든 설정이다.
+
+- 기존 70k baseline: `pi_behavior_b1k_a100_baseline_draft`
+- 70k stage tracking: `pi_behavior_b1k_a100_baseline_stage_draft`
+- `num_train_steps=70_000`
+- `batch_size=28`
+- `num_workers=6`
+- `subtask_loss_weight=0.1`
+- `use_stage_conditioning=True`
+
+실행 명령:
+
+```bash
+uv run scripts/compute_norm_stats.py --config-name pi_behavior_b1k_a100_baseline_stage_draft
+uv run scripts/train.py pi_behavior_b1k_a100_baseline_stage_draft --overwrite
+```
+
+중간부터 이어서 돌릴 때:
+
+```bash
+uv run scripts/train.py pi_behavior_b1k_a100_baseline_stage_draft --resume
+```
+
+정리:
+
+- `pi_behavior_b1k_a100_week_stage`의 10k는 빠른 구조 확인용이다.
+- 실제 baseline과 공정 비교하는 stage tracking 재학습은 `pi_behavior_b1k_a100_baseline_stage_draft`를 사용한다.
+- stage tracking 때문에 70k가 10k로 바뀐 것이 아니라, 실험 목적이 다른 config가 둘 다 존재하는 것이다.
+
 ## 2026-05-06 System 2 stage tracking 설정 추가
 
 ### 목표
