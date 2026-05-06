@@ -1001,6 +1001,26 @@ _CONFIGS.append(
     )
 )
 
+# [2026-05-07 수정] System2(stage/subtask reasoning) 완전 활성화 실험
+# baseline 70k 조건은 유지하고, task embedding + stage conditioning + subtask loss를 켠다.
+_CONFIGS.append(
+    dataclasses.replace(
+        _baseline_cfg,
+        name="pi_behavior_b1k_a100_system2_draft",
+        exp_name="a100_system2_draft",
+        model=dataclasses.replace(
+            _baseline_cfg.model,
+            subtask_loss_weight=0.1,
+        ),
+        data=dataclasses.replace(
+            _baseline_cfg.data,
+            use_stage_conditioning=True,
+        ),
+        overwrite=False,
+        resume=False,
+    )
+)
+
 # [2026-04-27 수정] FAST auxiliary 실험용 config
 # baseline과 동일 조건에서 use_fast_auxiliary만 켠 비교 실험
 _CONFIGS.append(

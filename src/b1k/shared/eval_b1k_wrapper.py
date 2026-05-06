@@ -151,7 +151,7 @@ class B1KWrapperConfig:
     time_threshold_inpaint: float = 0.3
     num_steps: int = 8
     apply_eval_tricks: bool = False
-    use_stage_tracking: bool = False
+    use_stage_tracking: bool = True
 
 class B1KPolicyWrapper():
     """PI_BEHAVIOR 모델을 BEHAVIOR 평가 서버 형식에 맞춰 감싸는 클래스.
