@@ -1,29 +1,72 @@
-# BEHAVIOR-1K Solution
+# BEHAVIOR-1K Lightweight Baseline
 
-이 저장소는 OpenPI 기반의 BEHAVIOR-1K 정책 학습 및 평가 파이프라인입니다.
+이 저장소는 2025 BEHAVIOR Challenge 1등팀 코드
+[`IliaLarchenko/behavior-1k-solution`](https://github.com/IliaLarchenko/behavior-1k-solution)을
+기본 백본으로 참고하되, 모든 기법을 그대로 가져오지 않고 **꼭 필요한 기술만 단계적으로 검증하기 위한 경량 베이스라인**입니다.
 
-BEHAVIOR-1K Challenge 환경에서 사용할 수 있는 커스텀 `PiBehavior` 모델, 데이터
-전처리, normalization 통계 계산, checkpoint 로딩, OmniGibson 평가용 websocket
-policy server를 포함합니다.
+현재 목표는 1등팀 모델에서 다음 세 가지 축만 남긴 비교 기준을 만드는 것입니다.
 
-RGB 관측, proprioception, task id 기반 conditioning, System 2 stage tracking,
-task별 checkpoint switching을 지원합니다.
+- **Task embedding**: 자연어 prompt 대신 task id embedding으로 task를 구분합니다.
+- **System 2 stage tracking**: 긴 task를 하나의 숫자로만 표현하지 않고, 현재 진행 stage를 함께 넣습니다.
+- **Flow matching**: action chunk를 생성하는 기본 학습/추론 방식은 Pi0 계열의 flow matching을 유지합니다.
+
+이 베이스라인을 먼저 학습하고 평가한 뒤, correlated noise, FAST auxiliary, KV transform,
+knowledge insulation 같은 1등팀의 추가 기술을 하나씩 켜 보며 성능 향상 폭을 비교합니다.
+최종 목적은 성능에 꼭 필요한 기술만 남기고, 불필요한 구성은 제거해서 더 가벼운 모델을 만드는 것입니다.
 
 ## 개요
 
 현재 A100 재학습 기본 추천 config는 `pi_behavior_b1k_a100_baseline_stage_draft`입니다.
-이 config는 기존 70k baseline과 같은 step / batch 조건에서 System 2 stage tracking만 추가합니다.
+이 config는 기존 70k task embedding baseline과 같은 step / batch 조건에서 System 2 stage tracking만 추가합니다.
 
 주요 특징은 다음과 같습니다.
 
-- OpenPI 기반 VLA policy를 BEHAVIOR-1K에 맞게 수정
+- OpenPI / Pi0.5 기반 VLA policy를 BEHAVIOR-1K에 맞게 수정
 - 자연어 prompt 대신 task id 기반 conditioning 사용
 - 선택한 12개 task subset을 global id에서 local id로 변환
 - 3-view RGB 이미지와 robot proprioception 사용
-- Pi0.5 backbone + task embedding + flow matching baseline 유지
+- Pi0.5 backbone + task embedding + flow matching 유지
 - System 2 stage prediction / stage-conditioned token 지원
 - A100 단일 GPU에서 검증된 70k baseline 조건을 기준으로 비교
 - BEHAVIOR task id별 checkpoint switching 지원
+
+## 1등팀 코드 대비 변경점
+
+이 저장소는 1등팀 전체 재현본이 아니라, **기술별 ablation을 위한 축소형 실험 repo**입니다.
+
+| 항목 | 1등팀 코드 | 이 저장소의 현재 baseline |
+| --- | --- | --- |
+| 목적 | 대회 성능 최대화 | 필요한 기술만 남기기 위한 비교 기준 |
+| Task 범위 | 전체 BEHAVIOR task / task group 중심 | 선택한 12개 task subset |
+| Task 표현 | task embedding 및 추가 적응 기법 사용 | task embedding 사용 |
+| Stage 정보 | System 2 방식의 stage 정보 활용 | stage-conditioned token과 stage prediction head만 우선 사용 |
+| Action 학습 | flow matching 기반 | flow matching 유지 |
+| FAST auxiliary | 사용 가능 | 현재 baseline에서는 OFF |
+| Correlated noise | 사용 가능 | 현재 baseline에서는 OFF |
+| KV transform | 사용 가능 | 현재 baseline에서는 OFF |
+| Knowledge insulation | 사용 가능 | 현재 baseline에서는 OFF |
+| Fine-tuning 전략 | task group별 추가 fine-tuning 포함 | 70k 단일 비교 학습 기준 |
+| 목표 모델 크기 | 성능 중심 | 성능에 필요한 요소만 남겨 경량화 |
+
+현재 포함하는 핵심 config:
+
+```text
+pi_behavior_b1k_a100_baseline_stage_draft
+```
+
+이 config는 `task embedding + System 2 stage tracking + flow matching`만 켠 70k 재학습 설정입니다.
+기존 순수 task embedding baseline인 `pi_behavior_b1k_a100_baseline_draft`와 같은 조건에서 비교할 수 있게 만들었습니다.
+
+현재 의도적으로 꺼 둔 기술:
+
+- `use_correlated_noise=False`
+- `use_fast_auxiliary=False`
+- `use_kv_transform=False`
+- `use_knowledge_insulation=False`
+- `use_fast_tokenization=False`
+
+이렇게 꺼 둔 이유는, 성능이 오른다고 해서 모든 기법이 꼭 필요한 것은 아니기 때문입니다.
+먼저 작은 기준선을 만들고, 이후 기능을 하나씩 추가하면서 어느 기술이 실제 점수 향상에 기여하는지 확인합니다.
 
 ## 저장소 구조
 
@@ -257,6 +300,7 @@ RTX 5070은 OmniGibson / Isaac Sim 실행과 평가에 사용하고, A100은 JAX
 
 ## References
 
+- 1st Place Solution Code: https://github.com/IliaLarchenko/behavior-1k-solution
 - BEHAVIOR-1K: https://github.com/StanfordVL/BEHAVIOR-1K
 - BEHAVIOR Challenge: https://behavior.stanford.edu/challenge/
 - OpenPI: https://github.com/Physical-Intelligence/openpi
