@@ -64,7 +64,7 @@ class Args:
     tyro를 쓰기 때문에 아래 dataclass 필드들이 자동으로 CLI 옵션이 된다.
     예:
         uv run scripts/serve_b1k.py policy:checkpoint \
-            --policy.config pi_behavior_b1k_a100_week \
+            --policy.config pi_behavior_b1k_a100_week_stage \
             --policy.dir ~/models/checkpoint_1 \
             --port 8000
     """
@@ -105,6 +105,7 @@ class Args:
     time_threshold_inpaint: float = 0.3
     num_steps: int = 20
     apply_eval_tricks: bool = True  # Enable correction rules and gripper variation checks
+    use_stage_tracking: bool = True
     
     # Multi-checkpoint support for PI_BEHAVIOR models (optional).
     # JSON 안의 task id도 global task id 기준이어야 한다.
@@ -187,9 +188,17 @@ def main(args: Args) -> None:
         time_threshold_inpaint=args.time_threshold_inpaint,
         num_steps=args.num_steps,
         apply_eval_tricks=args.apply_eval_tricks,
+        use_stage_tracking=args.use_stage_tracking,
     )
     
-    logging.info(f"Wrapper config: execute={wrapper_config.actions_to_execute}, keep={wrapper_config.actions_to_keep}, steps={wrapper_config.execute_in_n_steps}, num_steps={wrapper_config.num_steps}")
+    logging.info(
+        "Wrapper config: execute=%s, keep=%s, steps=%s, num_steps=%s, stage_tracking=%s",
+        wrapper_config.actions_to_execute,
+        wrapper_config.actions_to_keep,
+        wrapper_config.execute_in_n_steps,
+        wrapper_config.num_steps,
+        wrapper_config.use_stage_tracking,
+    )
     
     if wrapper_config.apply_eval_tricks:
         logging.info("Eval tricks ENABLED - correction rules and gripper variation checks active")

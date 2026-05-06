@@ -119,17 +119,41 @@ class ModelTransformFactory(GroupFactory):
 
     # 이 모델은 텍스트 프롬프트 대신 task embedding을 쓰므로 사실상 사용하지 않는다.
     default_prompt: str | None = None
+    use_stage_conditioning: bool = False
 
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
         # [4/8] 나중에 prompt 구성이나 meta 처리에서 다시 건드릴 여지가 있어서 주석 처리
-        return _transforms.Group(
-            inputs=[
-                _transforms.ResizeImages(224, 224),
+        inputs: list[_transforms.DataTransformFn] = [
+            _transforms.ResizeImages(224, 224),
+        ]
+
+        if self.use_stage_conditioning:
+            # Stage tracking 학습 경로:
+            #   1. timestamp / episode length로 현재 stage id를 계산한다.
+            #   2. tokenized_prompt를 [local_task_id, stage_id] 형태로 만든다.
+            #
+            # ComputeSubtaskStateFromMeta의 dataset 필드는 data_loader에서
+            # 실제 dataset 생성 후 채워 준다.
+            inputs.extend([
+                b1k_transforms.ComputeSubtaskStateFromMeta(
+                    task_mapping=GLOBAL_TO_LOCAL,
+                ),
+                b1k_transforms.TaskIndexToTaskId(
+                    task_mapping=GLOBAL_TO_LOCAL,
+                    include_subtask_state=True,
+                ),
+            ])
+        else:
+            inputs.append(
                 # 전역 task id(원본 데이터셋 기준)를 subset 로컬 id(0~11)로 바꾼다.
                 # stage는 기본 경로에서 사용하지 않으므로 tokenized_prompt는 [task_id]만 만든다.
-                b1k_transforms.TaskIndexToTaskId(task_mapping=GLOBAL_TO_LOCAL),
-                _transforms.PadStatesAndActions(model_config.action_dim),
-            ],
+                b1k_transforms.TaskIndexToTaskId(task_mapping=GLOBAL_TO_LOCAL)
+            )
+
+        inputs.append(_transforms.PadStatesAndActions(model_config.action_dim))
+
+        return _transforms.Group(
+            inputs=inputs,
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -177,6 +201,7 @@ class LeRobotB1KDataConfig(DataConfigFactory):
     
     # FAST auxiliary tokenization (only for PI_BEHAVIOR with use_fast_auxiliary)
     use_fast_tokenization: bool = False
+    use_stage_conditioning: bool = False
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -217,7 +242,9 @@ class LeRobotB1KDataConfig(DataConfigFactory):
         # 모델 입력용 변환.
         # 여기서 가장 중요한 부분은 원래 전역 task id를
         # 12개 subset 전용 로컬 task id(0~11)로 바꾸는 것이다.
-        model_transforms = ModelTransformFactory()(model_config)
+        model_transforms = ModelTransformFactory(
+            use_stage_conditioning=self.use_stage_conditioning,
+        )(model_config)
         
         # FAST tokenization (if enabled for PI_BEHAVIOR)
         if self.use_fast_tokenization and hasattr(model_config, 'use_fast_auxiliary') and model_config.use_fast_auxiliary:
@@ -932,6 +959,70 @@ _CONFIGS = [
         num_workers=4,
         batch_size=8,
 
+        wandb_enabled=True,
+        fsdp_devices=1,
+        val_num_batches=2,
+    ),
+
+    TrainConfig(
+        # A100 한 장으로 돌리는 "task embedding + flow matching + System 2 stage tracking" 설정.
+        #
+        # pi_behavior_b1k_a100_week는 순수 baseline 비교용으로 남겨 두고,
+        # 이 config는 1등팀 System 2 아이디어(stage 예측 + stage-conditioned tokens)를 켠다.
+        # 즉 모델 입력 tokenized_prompt가 [local_task_id, stage_id]가 되며,
+        # stage_pred_from_vlm 보조 head도 subtask_loss_weight=0.1로 함께 학습한다.
+        name="pi_behavior_b1k_a100_week_stage",
+        exp_name="a100_week_stage_10k",
+        project_name="B1K",
+
+        model=pi_behavior_config.PiBehaviorConfig(
+            action_horizon=30,
+            action_dim=32,
+
+            # ---- baseline 유지 + stage tracking만 추가 ----
+            use_correlated_noise=False,
+            correlation_beta=0.0,
+            use_fast_auxiliary=False,
+            fast_loss_weight=0.0,
+            use_kv_transform=False,
+            use_knowledge_insulation=False,
+
+            # 1등팀 System 2와 같은 stage classification 보조 손실.
+            # stage label은 timestamp를 episode 길이에 따라 나눈 pseudo label이다.
+            subtask_loss_weight=0.1,
+            freeze_vision_backbone=True,
+        ),
+
+        data=LeRobotB1KDataConfig(
+            repo_id="IliaLarchenko/behavior_224_rgb",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                behavior_dataset_root="/home/data/datasets/behavior_224_rgb",
+                use_per_timestamp_norm=False,
+            ),
+            use_delta_joint_actions=False,
+            use_fast_tokenization=False,
+            use_stage_conditioning=True,
+        ),
+
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1e-4,
+            decay_steps=10_000,
+            decay_lr=1e-5,
+        ),
+        num_flow_samples=1,
+        weight_loader=weight_loaders.PiBehaviorWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        num_train_steps=10_000,
+        log_interval=50,
+        save_interval=1000,
+        keep_period=2000,
+        assets_base_dir="./outputs/assets",
+        checkpoint_base_dir="./outputs/checkpoints",
+        num_workers=4,
+        batch_size=8,
         wandb_enabled=True,
         fsdp_devices=1,
         val_num_batches=2,

@@ -35,6 +35,7 @@ from openpi_client.base_policy import BasePolicy
 from openpi_client.image_tools import resize_with_pad
 from b1k.policies.b1k_policy import extract_state_from_proprio
 from b1k.configs.task_subset import map_global_to_local
+from b1k.models.pi_behavior_config import TASK_NUM_STAGES
 from b1k.shared.proprioception_indices import PROPRIOCEPTION_INDICES
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,7 @@ class B1KWrapperConfig:
     time_threshold_inpaint: float = 0.3
     num_steps: int = 8
     apply_eval_tricks: bool = False
+    use_stage_tracking: bool = False
 
 class B1KPolicyWrapper():
     """PI_BEHAVIOR 모델을 BEHAVIOR 평가 서버 형식에 맞춰 감싸는 클래스.
@@ -185,26 +187,97 @@ class B1KPolicyWrapper():
         }
     
     def update_current_stage(self, predicted_subtask_logits):
-        """이 baseline에서는 stage 추적을 사용하지 않는다."""
-        return
+        """모델이 예측한 stage logit을 voting으로 부드럽게 반영한다.
+
+        한 번의 예측만 믿고 stage를 바로 바꾸면 화면이 애매한 순간에 앞뒤로 흔들릴 수 있다.
+        그래서 최근 예측을 history에 모아두고, 같은 다음 stage가 일정 횟수 이상 나왔을 때만
+        current_stage를 올린다.
+        """
+        if not self.config.use_stage_tracking or self.local_task_id is None:
+            return
+
+        logits = np.asarray(predicted_subtask_logits)
+        if logits.ndim > 1:
+            logits = logits[0]
+
+        max_stage = TASK_NUM_STAGES[self.local_task_id] - 1
+        predicted_stage = int(np.argmax(logits))
+        predicted_stage = max(0, min(predicted_stage, max_stage))
+        self.prediction_history.append(predicted_stage)
+
+        if len(self.prediction_history) < self.config.history_len:
+            return
+
+        next_stage = self.current_stage + 1
+        if next_stage <= max_stage:
+            votes_for_next = sum(1 for pred in self.prediction_history if pred == next_stage)
+            votes_to_skip = sum(1 for pred in self.prediction_history if pred == next_stage + 1)
+
+            if votes_for_next >= self.config.votes_to_promote:
+                old_stage = self.current_stage
+                self.current_stage = next_stage
+                self.prediction_history.clear()
+                logger.info(
+                    "Stage advanced: %s -> %s (global task %s, local task %s, step %s)",
+                    old_stage,
+                    self.current_stage,
+                    self.task_id,
+                    self.local_task_id,
+                    self.step_count,
+                )
+            elif votes_to_skip == self.config.history_len and next_stage < max_stage:
+                old_stage = self.current_stage
+                self.current_stage = next_stage
+                self.prediction_history.clear()
+                logger.info(
+                    "Stage skipped: %s -> %s (global task %s, local task %s, step %s)",
+                    old_stage,
+                    self.current_stage,
+                    self.task_id,
+                    self.local_task_id,
+                    self.step_count,
+                )
+
+        prev_stage = self.current_stage - 1
+        if prev_stage >= 0:
+            votes_to_go_back = sum(1 for pred in self.prediction_history if pred == prev_stage)
+            if votes_to_go_back == self.config.history_len:
+                old_stage = self.current_stage
+                self.current_stage = prev_stage
+                self.prediction_history.clear()
+                logger.info(
+                    "Stage went back: %s -> %s (global task %s, local task %s, step %s)",
+                    old_stage,
+                    self.current_stage,
+                    self.task_id,
+                    self.local_task_id,
+                    self.step_count,
+                )
     
     def prepare_batch_for_pi_behavior(self, batch):
-        """모델 입력에 로컬 task id만 추가한다.
+        """모델 입력에 로컬 task id와 선택적으로 현재 stage id를 추가한다.
 
         이 모델은 텍스트 프롬프트를 읽지 않는다.
-        대신 "몇 번째 태스크인지"를 숫자로 넣고, 모델 내부 embedding 표에서
-        해당 태스크 벡터를 꺼내 쓴다.
+        대신 "몇 번째 태스크인지"와 "현재 몇 번째 stage인지"를 숫자로 넣고,
+        모델 내부 embedding 표에서 해당 벡터를 꺼내 쓴다.
         """
         task_id = self.local_task_id if self.local_task_id is not None else -1
         batch_copy = batch.copy()
         if "prompt" in batch_copy:
             del batch_copy["prompt"]
 
-        # PI_BEHAVIOR 기본 경로에서는 텍스트 프롬프트를 쓰지 않는다.
-        # tokenized_prompt라는 이름은 OpenPI 코드 흐름과 맞추기 위해 유지하지만,
-        # 실제 내용은 자연어 토큰이 아니라 local task id 하나다.
-        batch_copy["tokenized_prompt"] = np.array([task_id], dtype=np.int32)
-        batch_copy["tokenized_prompt_mask"] = np.array([True], dtype=bool)
+        if self.config.use_stage_tracking:
+            batch_copy["tokenized_prompt"] = np.array(
+                [task_id, self.current_stage], dtype=np.int32
+            )
+            batch_copy["tokenized_prompt_mask"] = np.array([True, True], dtype=bool)
+            batch_copy["subtask_state"] = np.array(self.current_stage, dtype=np.int32)
+        else:
+            # PI_BEHAVIOR 기본 경로에서는 텍스트 프롬프트를 쓰지 않는다.
+            # tokenized_prompt라는 이름은 OpenPI 코드 흐름과 맞추기 위해 유지하지만,
+            # 실제 내용은 자연어 토큰이 아니라 local task id 하나다.
+            batch_copy["tokenized_prompt"] = np.array([task_id], dtype=np.int32)
+            batch_copy["tokenized_prompt_mask"] = np.array([True], dtype=bool)
         return batch_copy
     
     def _interpolate_actions(self, actions, target_steps):

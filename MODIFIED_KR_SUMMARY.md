@@ -4,6 +4,81 @@
 
 새 작업은 항상 이 파일의 위쪽에 추가하고, 예전 작업 기록은 지우지 않는다.
 
+## 2026-05-06 System 2 stage tracking 설정 추가
+
+### 목표
+
+- 기존 `task embedding + flow matching only` baseline은 비교용으로 유지한다.
+- 새 실험 config에서는 1등팀의 System 2 아이디어처럼 현재 task stage를 모델 입력에 함께 넣는다.
+- 학습 중에는 timestamp와 episode 길이로 pseudo stage label을 만들고, stage prediction head를 보조 손실로 학습한다.
+- 추론 중에는 wrapper가 현재 stage를 `[local_task_id, current_stage]` 형태로 넣고, 모델이 예측한 stage logit을 voting으로 반영한다.
+
+### 새로 추가한 config
+
+- 파일: `src/b1k/training/config.py`
+- config 이름: `pi_behavior_b1k_a100_week_stage`
+- 실험 이름: `a100_week_stage_10k`
+- 기본 학습 step: `num_train_steps=10_000`
+- 기본 batch size: `batch_size=8`
+- stage 보조 손실: `subtask_loss_weight=0.1`
+- stage conditioning: `use_stage_conditioning=True`
+
+### 유지한 baseline 성격
+
+- correlated noise: OFF
+- FAST auxiliary loss: OFF
+- KV transform: OFF
+- knowledge insulation: OFF
+- delta joint action: OFF
+- FAST tokenization: OFF
+
+즉 이번 설정은 `task embedding + flow matching` baseline에 stage tracking만 추가한 비교 실험용이다.
+
+### 수정한 코드 흐름
+
+- `src/b1k/transforms.py`
+  - `TaskIndexToTaskId`가 필요할 때 `[local_task_id, stage_id]`를 만들 수 있게 했다.
+  - `ComputeSubtaskStateFromMeta`가 global task id를 local task id로 바꾼 뒤 `TASK_NUM_STAGES`를 조회하도록 수정했다.
+
+- `src/b1k/training/data_loader.py`
+  - stage 계산 transform이 실제 dataset metadata를 볼 수 있도록 dataset 생성 후 연결한다.
+  - 이 연결이 있어야 episode length를 기준으로 timestamp를 stage id로 바꿀 수 있다.
+
+- `src/b1k/models/pi_behavior.py`
+  - stage logit의 cross entropy를 `total_loss`에 더하도록 정리했다.
+  - 서빙/평가에 필요한 `sample_actions()`를 복원했다.
+  - `sample_actions()`는 action chunk와 stage logits를 함께 반환한다.
+
+- `src/b1k/shared/eval_b1k_wrapper.py`
+  - `use_stage_tracking=True`이면 모델 입력을 `[local_task_id, current_stage]`로 만든다.
+  - 모델이 예측한 stage를 history voting으로 반영해 stage가 너무 흔들리지 않게 했다.
+
+- `scripts/serve_b1k.py`
+  - 기본 예시 config를 `pi_behavior_b1k_a100_week_stage`로 바꿨다.
+  - `--use-stage-tracking / --no-use-stage-tracking` 옵션으로 stage tracking을 켜고 끌 수 있게 했다.
+
+### 실행 명령
+
+학습:
+
+```bash
+uv run scripts/train.py pi_behavior_b1k_a100_week_stage --overwrite
+```
+
+이어 학습:
+
+```bash
+uv run scripts/train.py pi_behavior_b1k_a100_week_stage --resume
+```
+
+서빙:
+
+```bash
+uv run scripts/serve_b1k.py policy:checkpoint \
+  --policy.config pi_behavior_b1k_a100_week_stage \
+  --policy.dir /path/to/checkpoint
+```
+
 ## 2026-04-16 A100 1주 이내 baseline 실험 설정 추가
 
 ### 목표

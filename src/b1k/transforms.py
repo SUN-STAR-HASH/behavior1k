@@ -67,6 +67,7 @@ class TaskIndexToTaskId(DataTransformFn):
     # 예: {0: 0, 1: 1, 5: 2, ..., 46: 11}
     # None이면 이미 local id가 들어왔다고 보고 그대로 사용한다.
     task_mapping: dict[int, int] | None = None
+    include_subtask_state: bool = False
     
     def __call__(self, data: DataDict) -> DataDict:
         # 추론에서는 task_index 대신 task_id라는 이름으로 들어올 수 있다.
@@ -100,15 +101,30 @@ class TaskIndexToTaskId(DataTransformFn):
                 return data  # Already has tokenized_prompt, skip this transform
             raise ValueError("Either task_index, task_id, or tokenized_prompt is required for PI_BEHAVIOR model")
 
-        # 기본 경로는 stage 토큰을 따로 붙이지 않는다.
-        # 최종적으로 local task id 하나만 모델에 전달한다.
-        #
-        # shape이 [1]인 이유:
-        #   모델 쪽에서 batch를 만들면 [B, 1]이 된다.
-        #   두 번째 값(stage id)을 붙이면 [B, 2]가 되고 stage conditioning 경로가 열린다.
+        if self.include_subtask_state:
+            # Stage tracking 경로에서는 tokenized_prompt 두 칸을 쓴다.
+            #   [0] = local task id
+            #   [1] = 현재 stage id
+            #
+            # subtask_state가 없으면 stage 0으로 시작한다. 이렇게 하면 smoke/fallback에서도
+            # shape은 유지되고, 실데이터에서는 ComputeSubtaskStateFromMeta가 값을 채워 준다.
+            subtask_state = int(data.get("subtask_state", 0))
+            prompt_tokens = np.array([task_id, subtask_state], dtype=np.int32)
+            prompt_mask = np.array([True, True], dtype=bool)
+        else:
+            # 기본 경로는 stage 토큰을 따로 붙이지 않는다.
+            # 최종적으로 local task id 하나만 모델에 전달한다.
+            #
+            # shape이 [1]인 이유:
+            #   모델 쪽에서 batch를 만들면 [B, 1]이 된다.
+            #   두 번째 값(stage id)을 붙이면 [B, 2]가 되고 stage conditioning 경로가 열린다.
+            prompt_tokens = np.array([task_id], dtype=np.int32)
+            prompt_mask = np.array([True], dtype=bool)
 
         data = dict(data)
         data["task_id"] = task_id
+        data["tokenized_prompt"] = prompt_tokens
+        data["tokenized_prompt_mask"] = prompt_mask
         return data
 
 @dataclasses.dataclass(frozen=True)
@@ -141,6 +157,7 @@ class ComputeSubtaskStateFromMeta(DataTransformFn):
     """
     
     dataset: object | None = None  # Will be set by data loader
+    task_mapping: dict[int, int] | None = None
     
     def __call__(self, data: DataDict) -> DataDict:
         if self.dataset is None:
@@ -156,15 +173,29 @@ class ComputeSubtaskStateFromMeta(DataTransformFn):
         episode_index = int(data["episode_index"])
         timestamp = float(data["timestamp"])
         task_index = int(data["task_index"])
+
+        # task_index는 원본 BEHAVIOR global id다.
+        # TASK_NUM_STAGES는 현재 12-task subset의 local id 순서로 만들어져 있으므로
+        # stage 수를 조회하기 전에 global -> local 변환을 해야 한다.
+        if self.task_mapping is not None:
+            if task_index not in self.task_mapping:
+                logging.warning(f"task_index {task_index} not found in task_mapping, using stage 0")
+                data["subtask_state"] = np.array(0, dtype=np.int32)
+                return data
+            local_task_id = self.task_mapping[task_index]
+        else:
+            local_task_id = task_index
         
         # Validate task_index
-        if not (0 <= task_index < 50):
-            logging.warning(f"Invalid task_index {task_index}, using stage 0")
+        if not (0 <= local_task_id < len(TASK_NUM_STAGES)):
+            logging.warning(
+                f"Invalid local_task_id {local_task_id} for task_index {task_index}, using stage 0"
+            )
             data["subtask_state"] = np.array(0, dtype=np.int32)
             return data
         
         # Get number of stages for this task
-        num_stages = TASK_NUM_STAGES[task_index]
+        num_stages = TASK_NUM_STAGES[local_task_id]
         
         # Get episode length from dataset metadata
         if not hasattr(self.dataset, 'meta') or not hasattr(self.dataset.meta, 'episodes'):
@@ -174,15 +205,23 @@ class ComputeSubtaskStateFromMeta(DataTransformFn):
             
         meta_episodes = self.dataset.meta.episodes
         
-        if episode_index not in meta_episodes:
+        try:
+            episode_info = meta_episodes[episode_index]
+        except Exception:
             logging.warning(f"Episode {episode_index} not found in metadata, using stage 0")
             data["subtask_state"] = np.array(0, dtype=np.int32)
             return data
-            
-        episode_info = meta_episodes[episode_index]
         
-        # Try 'length' first (standard key), then 'episode_length' (alternative)
-        episode_length = episode_info.get('length', episode_info.get('episode_length', None))
+        # Try 'length' first (standard key), then 'episode_length' (alternative).
+        # 환경에 따라 episode_info가 dict일 수도 있고 dataclass/object일 수도 있다.
+        if hasattr(episode_info, "get"):
+            episode_length = episode_info.get('length', episode_info.get('episode_length', None))
+        else:
+            episode_length = getattr(
+                episode_info,
+                "length",
+                getattr(episode_info, "episode_length", None),
+            )
         
         if episode_length is None or episode_length <= 0:
             logging.warning(f"Invalid episode_length for episode {episode_index}, using stage 0")

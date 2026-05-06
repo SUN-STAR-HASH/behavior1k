@@ -1465,6 +1465,26 @@ class PiBehavior(_model.BaseModel):
         # num_flow_samples 개 샘플의 손실을 평균한다.
         losses['flow'] = jnp.mean(jnp.stack(flow_losses, axis=0), axis=0)  # [B, H]
         losses['subtask'] = subtask_logits  # stage logit (나중에 cross-entropy 계산)
+        losses["action_loss"] = jnp.mean(losses["flow"], axis=-1)  # [B]
+
+        subtask_loss_value = 0.0
+        if train and observation.tokenized_prompt.shape[1] > 1:
+            # 정답 stage는 tokenized_prompt[:, 1]에 들어 있다.
+            # ComputeSubtaskStateFromMeta가 timestamp를 episode 진행률로 바꿔 만든 값이다.
+            ground_truth_subtask = observation.tokenized_prompt[:, 1]
+            subtask_loss = -jax.nn.log_softmax(subtask_logits, axis=-1)[
+                jnp.arange(ground_truth_subtask.shape[0]), ground_truth_subtask
+            ]
+            losses["subtask_loss"] = subtask_loss
+            losses["subtask_accuracy"] = (
+                jnp.argmax(subtask_logits, axis=-1) == ground_truth_subtask
+            ).astype(jnp.float32)
+            subtask_loss_value = self.config.subtask_loss_weight * subtask_loss
+        else:
+            losses["subtask_loss"] = jnp.zeros((batch_size,), dtype=actions.dtype)
+            losses["subtask_accuracy"] = jnp.zeros((batch_size,), dtype=actions.dtype)
+
+        losses["total_loss"] = losses["action_loss"] + subtask_loss_value
 
         # [2026-04-17] train.py는 losses_dict["total_loss"]를 기대하므로
         # compute_detailed_loss()에서 최종 loss를 명시적으로 만들어 준다.
@@ -1522,3 +1542,198 @@ class PiBehavior(_model.BaseModel):
         losses["total_loss"] = total_loss
 
         return losses
+
+    @override
+    def sample_actions(
+        self,
+        rng: at.KeyArrayLike,
+        observation: Observation,
+        *,
+        num_steps: int | at.Int[at.Array, ""] = 20,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
+        initial_actions: at.Float[at.Array, "b n ad"] | None = None,
+    ) -> tuple[_model.Actions, at.Float[at.Array, "b s"]]:
+        """Flow matching ODE를 적분해서 action chunk와 stage logits를 반환한다.
+
+        Stage tracking을 쓰려면 추론 입력의 tokenized_prompt가
+        [local_task_id, current_stage] 형태여야 한다. wrapper가 current_stage를 넣고,
+        여기서 모델이 다음 stage 분포를 예측해 wrapper가 voting으로 갱신한다.
+        """
+        observation = preprocess_observation(None, observation, train=False)
+        dt = -1.0 / num_steps
+        batch_size = observation.state.shape[0]
+
+        if observation.fast_tokens is not None:
+            raise ValueError(
+                "FAST tokens must not be provided during inference. "
+                "FAST tokens are only used during auxiliary training."
+            )
+
+        # ── 초기 noise 생성 / rolling inpainting 준비 ─────────────────────
+        if initial_actions is not None:
+            num_initial_actions = initial_actions.shape[1]
+            input_action_dim = initial_actions.shape[2]
+
+            if input_action_dim < self.action_dim:
+                action_padding = jnp.zeros(
+                    (batch_size, num_initial_actions, self.action_dim - input_action_dim)
+                )
+                initial_actions_full_dim = jnp.concatenate([initial_actions, action_padding], axis=2)
+            else:
+                initial_actions_full_dim = initial_actions[:, :, :self.action_dim]
+
+            if num_initial_actions < self.action_horizon:
+                seq_padding = jnp.zeros(
+                    (batch_size, self.action_horizon - num_initial_actions, self.action_dim)
+                )
+                initial_actions_padded = jnp.concatenate([initial_actions_full_dim, seq_padding], axis=1)
+            else:
+                initial_actions_padded = initial_actions_full_dim[:, :self.action_horizon]
+
+            flat_dim = self.action_horizon * self.action_dim
+            O_indices = jnp.array(
+                [
+                    t * self.action_dim + d
+                    for t in range(num_initial_actions)
+                    for d in range(input_action_dim)
+                ],
+                dtype=jnp.int32,
+            )
+            O_set = {
+                t * self.action_dim + d
+                for t in range(num_initial_actions)
+                for d in range(input_action_dim)
+            }
+            U_indices = jnp.array([i for i in range(flat_dim) if i not in O_set], dtype=jnp.int32)
+
+            rng, noise_rng = jax.random.split(rng)
+            noise = self.generate_correlated_noise(noise_rng, batch_size)
+
+            noise_flat = noise.reshape(batch_size, flat_dim)
+            fixed_z_O = noise_flat[:, O_indices]
+            x0_O = initial_actions_padded.reshape(batch_size, flat_dim)[:, O_indices]
+
+            inpainting_cache = None
+            if self.correlation_loaded:
+                cache_key = (num_initial_actions, input_action_dim)
+                if cache_key not in self.inpainting_cache:
+                    logger.info(
+                        "Computing correction matrix for %s steps, %s dims...",
+                        num_initial_actions,
+                        input_action_dim,
+                    )
+                    self.inpainting_cache[cache_key] = self._precompute_correction_matrix(
+                        O_indices, U_indices
+                    )
+                inpainting_cache = self.inpainting_cache[cache_key]
+        else:
+            if noise is None:
+                rng, noise_rng = jax.random.split(rng)
+                noise = self.generate_correlated_noise(noise_rng, batch_size)
+
+            fixed_z_O = None
+            x0_O = None
+            O_indices = None
+            inpainting_cache = None
+
+        rng, step_rng = jax.random.split(rng)
+
+        # ── Prefix 한 번 계산: image/task/stage/state KV cache 생성 ───────
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        (prefix_out, _), kv_cache = self.PaliGemma.llm(
+            [prefix_tokens, None],
+            mask=prefix_attn_mask,
+            positions=positions,
+        )
+
+        # Stage logit은 base task token의 VLM 출력에서 예측한다.
+        if observation.tokenized_prompt.shape[1] > 1:
+            first_stage_token_idx = jnp.argmax(prefix_ar_mask)
+            base_task_token_idx = first_stage_token_idx - 1
+            base_task_output = prefix_out[:, base_task_token_idx, :]
+            subtask_logits = self.stage_pred_from_vlm(base_task_output)
+
+            task_ids = observation.tokenized_prompt[:, 0]
+            task_num_stages_array = jnp.array(TASK_NUM_STAGES, dtype=jnp.int32)
+            task_num_stages = task_num_stages_array[task_ids]
+            stage_range = jnp.arange(MAX_NUM_STAGES)
+            valid_mask = stage_range[None, :] < task_num_stages[:, None]
+            subtask_logits = jnp.where(valid_mask, subtask_logits, -jnp.inf)
+        else:
+            subtask_logits = jnp.zeros((batch_size, MAX_NUM_STAGES), dtype=prefix_out.dtype)
+
+        if self.kv_transform is not None:
+            kv_cache = self.kv_transform(kv_cache)
+
+        def step(carry):
+            x_t, time, step_rng = carry
+
+            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+                observation,
+                x_t,
+                jnp.broadcast_to(time, batch_size),
+            )
+            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+            prefix_attn_mask_for_suffix = einops.repeat(
+                prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1]
+            )
+            full_attn_mask = jnp.concatenate(
+                [prefix_attn_mask_for_suffix, suffix_attn_mask], axis=-1
+            )
+            positions = (
+                jnp.sum(prefix_mask, axis=-1)[:, None]
+                + jnp.cumsum(suffix_mask, axis=-1) - 1
+            )
+
+            (prefix_out_suffix, suffix_out), _ = self.PaliGemma.llm(
+                [None, suffix_tokens],
+                mask=full_attn_mask,
+                positions=positions,
+                kv_cache=kv_cache,
+                adarms_cond=[None, adarms_cond],
+            )
+            del prefix_out_suffix
+
+            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon:])
+            x_t_new = x_t + dt * v_t
+
+            if fixed_z_O is not None:
+                time_new = time + dt
+
+                def apply_correlated_correction(x):
+                    x_flat = x.reshape(batch_size, -1)
+                    x_desired_O = (1.0 - time_new) * x0_O + time_new * fixed_z_O
+                    delta_O = x_desired_O - x_flat[:, O_indices]
+                    x_flat = x_flat.at[:, O_indices].set(x_desired_O)
+
+                    if inpainting_cache is not None:
+                        correction_matrix = inpainting_cache["correction_matrix"]
+                        U_indices_cached = inpainting_cache["U_indices"]
+                        delta_U = delta_O @ correction_matrix.T
+                        max_correction = jnp.max(jnp.abs(delta_U))
+                        x_flat = jax.lax.cond(
+                            max_correction <= 1.0,
+                            lambda y: y.at[:, U_indices_cached].add(delta_U),
+                            lambda y: y,
+                            x_flat,
+                        )
+
+                    return x_flat.reshape(batch_size, self.action_horizon, self.action_dim)
+
+                x_t_new = jax.lax.cond(
+                    time_new > self.config.time_threshold_inpaint,
+                    apply_correlated_correction,
+                    lambda x: x,
+                    x_t_new,
+                )
+
+            return x_t_new, time + dt, step_rng
+
+        def cond(carry):
+            _, time, _ = carry
+            return time >= -dt / 2
+
+        x_0, _, _ = jax.lax.while_loop(cond, step, (noise, 1.0, step_rng))
+        return x_0, subtask_logits
