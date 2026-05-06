@@ -1,4 +1,4 @@
-# BEHAVIOR-1K Lightweight Baseline
+# BEHAVIOR-1K Baseline
 
 이 저장소는 2025 BEHAVIOR Challenge 1등팀 코드
 [`IliaLarchenko/behavior-1k-solution`](https://github.com/IliaLarchenko/behavior-1k-solution)을
