@@ -11,3 +11,9 @@ assets/
 .DS_Store
 *_old.py
 *_backup.py
+
+# eval outputs
+eval_logs/
+eval_logs_*/
+eval_selected12_*.log
+*.mp4
