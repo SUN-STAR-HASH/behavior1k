@@ -510,9 +510,14 @@ class B1KPolicyWrapper():
         # 이 코드는 성능 향상용이 아니라 원인 분리용 임시 safety filter다.
         current_action = current_action.copy()
 
-        debug_mode = os.environ.get("B1K_ACTION_DEBUG_MODE", "eval_stable_v6")
+        debug_mode = os.environ.get("B1K_ACTION_DEBUG_MODE")
+        if debug_mode is None:
+            debug_mode = "eval_stable_v6" if self.config.apply_eval_tricks else "none"
 
-        if debug_mode == "zero_all":
+        if debug_mode in ("none", "off", "raw"):
+            pass
+
+        elif debug_mode == "zero_all":
             current_action[:] = 0.0
 
         elif debug_mode == "base_only":

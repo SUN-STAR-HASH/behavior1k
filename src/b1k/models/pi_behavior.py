@@ -1075,11 +1075,10 @@ class PiBehavior(_model.BaseModel):
     # - initial_actions를 유지해서 action chunk 간 연속성을 보존
     # - sample_actions()가 (actions, subtask_logits)를 반환
     # - policy 쪽 임시 패치를 제거할 수 있게 함
-    @override
-    def sample_actions(
+    def _legacy_sample_actions_simple(
         self,
         rng: at.KeyArrayLike,
-        observation: _model.Observation,
+        observation: Observation,
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
@@ -1484,7 +1483,6 @@ class PiBehavior(_model.BaseModel):
             losses["subtask_loss"] = jnp.zeros((batch_size,), dtype=actions.dtype)
             losses["subtask_accuracy"] = jnp.zeros((batch_size,), dtype=actions.dtype)
 
-        losses["total_loss"] = losses["action_loss"] + subtask_loss_value
 
         # [2026-04-17] train.py는 losses_dict["total_loss"]를 기대하므로
         # compute_detailed_loss()에서 최종 loss를 명시적으로 만들어 준다.
@@ -1502,8 +1500,8 @@ class PiBehavior(_model.BaseModel):
         if total_loss.ndim == 1:
             total_loss = total_loss[:, None]
 
-        if self.config.subtask_loss_weight > 0 and "subtask" in losses:
-            subtask_loss = losses["subtask"]
+        if self.config.subtask_loss_weight > 0 and "subtask_loss" in losses:
+            subtask_loss = losses["subtask_loss"]
 
             # subtask loss가 [B, ...] 형태면
             # 배치축(B)을 제외한 나머지 축을 평균내서 [B]로 정리한다.

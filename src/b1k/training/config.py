@@ -1148,6 +1148,28 @@ _CONFIGS.append(
 # baseline과 동일 조건에서 use_fast_auxiliary만 켠 비교 실험
 _CONFIGS.append(
     dataclasses.replace(
+        _baseline_cfg,
+        # 70k baseline과 같은 조건에서 stage tracking만 추가한 공정 비교용 config.
+        name="pi_behavior_b1k_a100_baseline_stage_draft",
+        exp_name="a100_baseline_stage_draft",
+        model=dataclasses.replace(
+            _baseline_cfg.model,
+            subtask_loss_weight=0.1,
+        ),
+        data=dataclasses.replace(
+            _baseline_cfg.data,
+            use_stage_conditioning=True,
+        ),
+        num_train_steps=70_000,
+        batch_size=28,
+        num_workers=6,
+        overwrite=False,
+        resume=False,
+    )
+)
+
+_CONFIGS.append(
+    dataclasses.replace(
         _smoke_cfg,
         name="pi_behavior_b1k_a100_fast_aux_draft",
         exp_name="a100_fast_aux_draft",

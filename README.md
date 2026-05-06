@@ -176,6 +176,19 @@ uv run scripts/train.py pi_behavior_b1k_a100_week_stage \
 uv run scripts/train.py pi_behavior_b1k_a100_week --overwrite
 ```
 
+원래 70k baseline과 같은 길이로 비교하려면 아래 두 config를 사용합니다.
+
+```bash
+# 70k 순수 task embedding baseline
+uv run scripts/train.py pi_behavior_b1k_a100_baseline_draft --overwrite
+
+# 70k baseline + System 2 stage tracking
+uv run scripts/train.py pi_behavior_b1k_a100_baseline_stage_draft --overwrite
+```
+
+즉 `stage tracking` 때문에 70k가 10k로 바뀐 것이 아니라,
+`pi_behavior_b1k_a100_week*` 계열만 1주 이내 빠른 실험용으로 10k를 사용합니다.
+
 Weights & Biases logging을 끄려면 다음 옵션을 사용합니다.
 
 ```bash

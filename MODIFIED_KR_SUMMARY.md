@@ -13,6 +13,27 @@
 - 학습 중에는 timestamp와 episode 길이로 pseudo stage label을 만들고, stage prediction head를 보조 손실로 학습한다.
 - 추론 중에는 wrapper가 현재 stage를 `[local_task_id, current_stage]` 형태로 넣고, 모델이 예측한 stage logit을 voting으로 반영한다.
 
+### 추가 점검 / 오류 수정
+
+- `src/b1k/models/pi_behavior.py`에 `sample_actions()`가 두 번 정의되어 있던 부분을 정리했다.
+  - Python은 뒤쪽 함수를 최종 사용하지만, 앞쪽 함수가 남아 있으면 사람이 볼 때 어떤 inference 경로가 실제인지 헷갈린다.
+  - 앞쪽 단순 구현은 `_legacy_sample_actions_simple()`로 이름을 바꿔 참고용으로만 남겼다.
+- stage loss가 `total_loss`에 잘못 더해질 수 있던 부분을 수정했다.
+  - 기존 코드에는 stage logit 자체를 loss처럼 평균해서 더할 위험이 있었다.
+  - 이제는 `subtask_loss`로 계산한 cross entropy만 `subtask_loss_weight`와 함께 더한다.
+- `eval_b1k_wrapper.py`의 action debug filter 기본 동작을 정리했다.
+  - `apply_eval_tricks=False`이면 raw action을 그대로 쓰도록 `B1K_ACTION_DEBUG_MODE=none` 경로를 추가했다.
+  - `apply_eval_tricks=True`일 때만 기본 안정화 모드 `eval_stable_v6`가 적용된다.
+- 70k baseline과 같은 조건으로 stage tracking만 켠 비교 config를 추가했다.
+  - 기존 70k baseline: `pi_behavior_b1k_a100_baseline_draft`
+  - 새 70k stage 비교: `pi_behavior_b1k_a100_baseline_stage_draft`
+
+중요한 정리:
+
+- stage tracking을 추가했다고 해서 기존 70k baseline이 10k로 바뀐 것은 아니다.
+- `pi_behavior_b1k_a100_week`와 `pi_behavior_b1k_a100_week_stage`는 A100 1장으로 1주 이내에 빠르게 실험하려고 따로 만든 10k config다.
+- 공정하게 "70k baseline vs 70k stage tracking"을 비교하려면 `pi_behavior_b1k_a100_baseline_draft`와 `pi_behavior_b1k_a100_baseline_stage_draft`를 비교하면 된다.
+
 ### 새로 추가한 config
 
 - 파일: `src/b1k/training/config.py`
