@@ -1519,6 +1519,7 @@ class PiBehavior(_model.BaseModel):
 
         if self.config.fast_loss_weight > 0 and "fast" in losses:
             fast_loss = losses["fast"]
+            losses["fast_loss"] = fast_loss
 
             # fast loss도 [B, ...] 형태일 수 있으므로
             # 배치축만 남기고 평균내서 [B]로 정리한다.

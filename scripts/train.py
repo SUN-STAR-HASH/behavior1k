@@ -112,6 +112,7 @@ def build_minimal_wandb_payload(
         "total_loss",
         "action_loss",
         "subtask_loss",
+        "fast_loss",
         "grad_norm",
         "param_norm",
         "subtask_accuracy",

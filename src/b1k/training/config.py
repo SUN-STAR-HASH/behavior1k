@@ -1117,6 +1117,114 @@ assets_dir="/home/data/projects/behavior1k/outputs/assets/pi_behavior_b1k_a100_s
     )
 )
 
+# [2026-05-13 추가] behavior1k-v2 통합 실험 config
+# baseline_draft를 기반으로 4개 기법을 동시에 켠 버전:
+# 1) correlated noise
+# 2) FAST auxiliary
+# 3) 2-sample multi flow matching
+# 4) KV transform
+#
+# 단순 flag ON이 아니라,
+# - FAST tokenization transform
+# - stage/subtask auxiliary 경로
+# - correlation matrix 로딩 경로
+# - multi-flow loss 반복 경로
+# 까지 실제 학습에서 타도록 연결한다.
+_behavior_v2_cfg = next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_baseline_draft")
+
+_CONFIGS.append(
+    dataclasses.replace(
+        _behavior_v2_cfg,
+        name="pi_behavior_b1k_a100_behavior_v2",
+        exp_name="a100_behavior_v2",
+
+        model=dataclasses.replace(
+            _behavior_v2_cfg.model,
+
+            # 1) Correlated noise
+            use_correlated_noise=True,
+            correlation_beta=0.5,
+
+            # 2) FAST auxiliary
+            use_fast_auxiliary=True,
+            fast_loss_weight=0.05,
+            fast_encoded_dims="0:6,7:23",
+            fast_vocab_size=1024,
+            max_fast_tokens=32,
+
+            # 3) KV transform
+            use_kv_transform=True,
+
+            # 4) Knowledge insulation은 끔
+            # 1등팀 방식도 FAST auxiliary를 쓰되 knowledge insulation은 쓰지 않는 쪽으로 정리되어 있음
+            use_knowledge_insulation=False,
+
+            # 5) stage / subtask auxiliary
+            # System2 계열 stage prediction loss까지 같이 반영
+            subtask_loss_weight=0.1,
+
+            # baseline과 동일하게 vision backbone freeze 유지
+            freeze_vision_backbone=True,
+        ),
+
+        data=dataclasses.replace(
+            _behavior_v2_cfg.data,
+
+            # FAST auxiliary가 실제 fast_tokens를 받게 하는 핵심 옵션
+            use_fast_tokenization=True,
+
+            # tokenized_prompt를 [task_id, stage_id] 구조로 만들기 위한 옵션
+            use_stage_conditioning=True,
+
+            # behavior1k-v2 전용 asset 경로
+            # 여기에 norm_stats + action_correlation_cholesky + fast_tokenizer가 있어야 함
+            assets=AssetsConfig(
+                assets_dir="/home/data/projects/behavior1k/outputs/assets/pi_behavior_b1k_a100_behavior_v2",
+                asset_id="IliaLarchenko/behavior_224_rgb",
+            ),
+        ),
+
+        # 3) 2-sample multi flow matching
+        # train.py에서 compute_detailed_loss(..., num_flow_samples=config.num_flow_samples)로 들어감
+        num_flow_samples=2,
+
+        # baseline 70k 조건 유지
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1000,
+            peak_lr=1e-4,
+            decay_steps=20_000,
+            decay_lr=1e-5,
+        ),
+        batch_size=28,
+        num_workers=6,
+        num_train_steps=70_000,
+        log_interval=10,
+        save_interval=1000,
+        keep_period=5000,
+        wandb_enabled=True,
+
+        overwrite=False,
+        resume=False,
+    )
+)
+
+# [2026-05-13 추가] behavior1k-v2 smoke config
+# 위 통합 기능이 실제로 forward/backward까지 가는지 20 step만 먼저 확인
+_CONFIGS.append(
+    dataclasses.replace(
+        next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_behavior_v2"),
+        name="pi_behavior_b1k_a100_behavior_v2_smoke20",
+        exp_name="a100_behavior_v2_smoke20",
+        num_train_steps=20,
+        log_interval=1,
+        save_interval=1000,
+        keep_period=1000,
+        wandb_enabled=True,
+        overwrite=True,
+        resume=False,
+    )
+)
+
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
