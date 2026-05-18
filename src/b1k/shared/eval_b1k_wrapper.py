@@ -130,20 +130,12 @@ def postprocess_action_eval_stable_v6(action: np.ndarray) -> np.ndarray:
 
 @dataclasses.dataclass
 class B1KWrapperConfig:
-    # [수정일: 2026-04-29]
-    # [수정 이유]
-    # 현재 70k checkpoint에서 26→20 action compression과 inpainting을 켜면
-    # base/arm action이 과하게 들어가 로봇이 넘어지는 현상이 발생한다.
-    #
-    # 따라서 먼저 안정성 확인을 위해 가장 보수적인 eval 설정으로 되돌린다.
-    # - action compression 끔: actions_to_execute == execute_in_n_steps
-    # - inpainting 끔: actions_to_keep = 0
-    # - eval tricks 끔: action 보정 rule 영향 제거
-    #
-    # 이 설정에서 로봇이 안 넘어지면,
-    # 원인은 policy 자체보다는 compression/inpainting 설정일 가능성이 크다.
-    actions_to_execute: int = 20
-    actions_to_keep: int = 0
+    # [2026-05-18 수정]
+    # behavior-v2 / 1st-team-like checkpoint 평가용 기본 rolling 설정.
+    # 30 horizon 중 앞 26개를 실행 후보로 쓰고, 뒤 4개는 다음 inference의 initial_actions로 넘긴다.
+    # 26개 action을 20 simulator step에 압축 실행해서 1등팀 wrapper 쪽 rolling/inpainting 구조에 가깝게 맞춘다.
+    actions_to_execute: int = 26
+    actions_to_keep: int = 4
     execute_in_n_steps: int = 20
 
     history_len: int = 1
@@ -1699,6 +1691,25 @@ class B1KPolicyWrapper():
 
             current_action[14] = np.clip(g14, -gripper_max, gripper_max)
             current_action[22] = np.clip(g22, -gripper_max, gripper_max)
+            # [2026-05-13] v16_yawfix: repeated spinning suppression
+            base_caps = np.asarray([
+                float(os.environ.get("B1K_V16_BASE0_MAX", "0.025")),
+                float(os.environ.get("B1K_V16_BASE1_MAX", "0.050")),
+                float(os.environ.get("B1K_V16_BASE2_MAX", "0.0015")),
+            ], dtype=np.float32)
+            base_dead = np.asarray([
+                float(os.environ.get("B1K_V16_BASE0_DEAD", "0.006")),
+                float(os.environ.get("B1K_V16_BASE1_DEAD", "0.008")),
+                float(os.environ.get("B1K_V16_BASE2_DEAD", "0.001")),
+            ], dtype=np.float32)
+            base_alpha = float(os.environ.get("B1K_V16_BASE_EMA_ALPHA", "0.10"))
+            base = np.asarray(current_action[:3], dtype=np.float32).copy()
+            base = np.clip(base, -base_caps, base_caps)
+            base[np.abs(base) < base_dead] = 0.0
+            if not hasattr(self, "_eval_radio_base_ema"):
+                self._eval_radio_base_ema = np.zeros(3, dtype=np.float32)
+            self._eval_radio_base_ema = (1.0 - base_alpha) * self._eval_radio_base_ema + base_alpha * base
+            current_action[:3] = self._eval_radio_base_ema
 
             if self.step_count % 20 == 0:
                 logger.info(
@@ -1710,6 +1721,159 @@ class B1KPolicyWrapper():
                     f"raw_15={raw_action[15]:.3f}, final_15={current_action[15]:.3f}, "
                     f"g14={current_action[14]:.3f}, "
                     f"g22={current_action[22]:.3f}"
+                )
+
+        elif debug_mode == "eval_1stlike_v17":
+            # [2026-05-18 추가]
+            # [목적]
+            # behavior-v2 / 1st-team-like checkpoint용 action 후처리.
+            #
+            # 현재 관찰:
+            # - arm은 너무 크게 튀고 있음
+            # - yaw는 거의 죽어 있음
+            # - behavior-v2 checkpoint는 correlated noise / FAST aux / KV transform 등
+            #   1등팀 계열 요소가 들어갔으므로 wrapper도 rolling/inpainting을 더 살리는 쪽이 맞음
+            #
+            # 방향:
+            # - base/yaw를 eval_selected12_v15/v16보다 더 살림
+            # - arm gain/clip은 v15/v16보다 낮춤
+            # - gripper는 완전 고정하지 않고 약하게만 허용
+            # - task-specific if 없이 12 task 공통으로 사용 가능하게 둠
+
+            raw_action = current_action.copy()
+
+            # ----------------------------
+            # 1) base / yaw / lateral
+            # ----------------------------
+            # 현재 코드 주석 기준:
+            # action[0] = forward/back
+            # action[1] = yaw
+            # action[2] = lateral
+            #
+            # 실제 축 매핑이 완전히 확정된 것은 아니므로,
+            # 나중에 필요하면 환경변수로 axis만 바꿔서 다시 테스트할 수 있게 둔다.
+            forward_axis = int(os.environ.get("B1K_FORWARD_AXIS", "0"))
+            yaw_axis = int(os.environ.get("B1K_YAW_AXIS", "1"))
+            lateral_axis = int(os.environ.get("B1K_LATERAL_AXIS", "2"))
+
+            forward_scale = float(os.environ.get("B1K_FORWARD_SCALE", "0.38"))
+            forward_max = float(os.environ.get("B1K_FORWARD_MAX", "0.30"))
+
+            # v15/v16의 yaw_max=0.018 수준은 너무 작아서 라디오 탐색이 죽는 것으로 보임.
+            # 그래서 yaw를 크게 살리되, smoothing과 clip으로 넘어짐을 억제한다.
+            yaw_scale = float(os.environ.get("B1K_YAW_SCALE", "0.22"))
+            yaw_max = float(os.environ.get("B1K_YAW_MAX", "0.14"))
+
+            lateral_scale = float(os.environ.get("B1K_LATERAL_SCALE", "0.22"))
+            lateral_max = float(os.environ.get("B1K_LATERAL_MAX", "0.16"))
+
+            planar_max = float(os.environ.get("B1K_PLANAR_MAX", "0.38"))
+
+            base = np.zeros(3, dtype=np.float32)
+            base[forward_axis] = np.clip(
+                raw_action[forward_axis] * forward_scale,
+                -forward_max,
+                forward_max,
+            )
+            base[yaw_axis] = np.clip(
+                raw_action[yaw_axis] * yaw_scale,
+                -yaw_max,
+                yaw_max,
+            )
+            base[lateral_axis] = np.clip(
+                raw_action[lateral_axis] * lateral_scale,
+                -lateral_max,
+                lateral_max,
+            )
+
+            # forward/lateral 평면 속도 제한
+            planar_norm = np.linalg.norm([base[forward_axis], base[lateral_axis]])
+            if planar_norm > planar_max:
+                base[forward_axis] = base[forward_axis] / (planar_norm + 1e-6) * planar_max
+                base[lateral_axis] = base[lateral_axis] / (planar_norm + 1e-6) * planar_max
+
+            # base smoothing
+            # step_count==0이면 새 task/eval 시작으로 보고 smoothing state 초기화
+            if self.step_count == 0 or not hasattr(self, "_firstlike_v17_last_base"):
+                self._firstlike_v17_last_base = np.zeros(3, dtype=np.float32)
+
+            base_smooth_prev = float(os.environ.get("B1K_BASE_SMOOTH_PREV", "0.60"))
+            base_smooth_new = 1.0 - base_smooth_prev
+            base = base_smooth_prev * self._firstlike_v17_last_base + base_smooth_new * base
+            self._firstlike_v17_last_base = base.copy()
+
+            current_action[0:3] = base
+
+            # ----------------------------
+            # 2) torso/trunk 안정화
+            # ----------------------------
+            torso_scale = float(os.environ.get("B1K_TORSO_SCALE", "0.04"))
+            torso_clip = float(os.environ.get("B1K_TORSO_CLIP", "0.08"))
+            current_action[3:7] = np.clip(
+                raw_action[3:7] * torso_scale,
+                -torso_clip,
+                torso_clip,
+            )
+
+            # ----------------------------
+            # 3) arms: v15/v16보다 줄임
+            # ----------------------------
+            # 기존 v15/v16은 arm_scale=1.60, clip=1.40이라 현재 영상처럼 팔 폭주가 생길 수 있음.
+            # v17은 arm을 적당히 살리되, 먼저 폭주를 줄이는 방향.
+            arm_scale = float(os.environ.get("B1K_ARM_SCALE", "0.65"))
+            arm_clip = float(os.environ.get("B1K_ARM_CLIP", "0.75"))
+
+            left_arm_gain = float(os.environ.get("B1K_LEFT_ARM_GAIN", "1.00"))
+            right_arm_gain = float(os.environ.get("B1K_RIGHT_ARM_GAIN", "1.00"))
+
+            left_arm = raw_action[7:14].copy()
+            right_arm = raw_action[15:22].copy()
+
+            # radio task에서 확인했던 팔 앞/뒤 축 sign flip은 옵션으로만 둔다.
+            # 필요하면 A100 서버 실행 전에 B1K_FLIP_ARM_FB=1 로 켠다.
+            if os.environ.get("B1K_FLIP_ARM_FB", "0") == "1":
+                left_arm[0] *= -1.0   # global action index 7
+                right_arm[0] *= -1.0  # global action index 15
+
+            current_action[7:14] = np.clip(
+                left_arm * arm_scale * left_arm_gain,
+                -arm_clip,
+                arm_clip,
+            )
+            current_action[15:22] = np.clip(
+                right_arm * arm_scale * right_arm_gain,
+                -arm_clip,
+                arm_clip,
+            )
+
+            # ----------------------------
+            # 4) grippers: 완전 고정하지 않고 약하게 허용
+            # ----------------------------
+            gripper_scale = float(os.environ.get("B1K_GRIPPER_SCALE", "1.50"))
+            gripper_max = float(os.environ.get("B1K_GRIPPER_MAX", "0.50"))
+            gripper_deadband = float(os.environ.get("B1K_GRIPPER_DEADBAND", "0.02"))
+
+            g14 = raw_action[14] * gripper_scale
+            g22 = raw_action[22] * gripper_scale
+
+            if abs(g14) < gripper_deadband:
+                g14 = 0.0
+            if abs(g22) < gripper_deadband:
+                g22 = 0.0
+
+            current_action[14] = np.clip(g14, -gripper_max, gripper_max)
+            current_action[22] = np.clip(g22, -gripper_max, gripper_max)
+
+            if self.step_count % 20 == 0:
+                logger.info(
+                    f"[eval_1stlike_v17] "
+                    f"step={self.step_count}, "
+                    f"base=({current_action[0]:.3f}, {current_action[1]:.3f}, {current_action[2]:.3f}), "
+                    f"raw_base=({raw_action[0]:.3f}, {raw_action[1]:.3f}, {raw_action[2]:.3f}), "
+                    f"forward_axis={forward_axis}, yaw_axis={yaw_axis}, lateral_axis={lateral_axis}, "
+                    f"arm_scale={arm_scale:.2f}, arm_clip={arm_clip:.2f}, "
+                    f"raw_g14={raw_action[14]:.3f}, raw_g22={raw_action[22]:.3f}, "
+                    f"final_g14={current_action[14]:.3f}, final_g22={current_action[22]:.3f}"
                 )
 
         elif debug_mode == "probe_sweep":
