@@ -259,7 +259,43 @@ def main(
     all_episode_files = sorted(data_root.glob("data/task-*/episode_*.parquet"))
 
     episode_files = all_episode_files
-    print(f"Using all {len(episode_files)} episodes")
+
+    # [2026-05-13 추가] config의 episodes_index가 있으면 해당 episode만 사용한다.
+    # behavior-v2 / baseline 12-task 실험은 selected12 episode 2400개 기준으로
+    # FAST tokenizer도 학습해야 하므로 전체 10000개 episode를 쓰지 않는다.
+    def _episode_index_from_file(path):
+        # 예: episode_00000010.parquet -> 10
+        return int(path.stem.split("_")[-1])
+
+    _cfg_obj = locals().get("config") or locals().get("train_config") or locals().get("cfg")
+    _data_obj = locals().get("data_config") or getattr(_cfg_obj, "data", None)
+
+    _candidate_objs = [
+        getattr(_data_obj, "base_config", None),
+        _data_obj,
+        getattr(getattr(_cfg_obj, "data", None), "base_config", None),
+        getattr(_cfg_obj, "data", None),
+    ]
+
+    _episodes_index = None
+    for _obj in _candidate_objs:
+        if _obj is not None and getattr(_obj, "episodes_index", None):
+            _episodes_index = getattr(_obj, "episodes_index")
+            break
+
+    if _episodes_index:
+        _episodes_index = set(int(x) for x in _episodes_index)
+        _before = len(episode_files)
+        episode_files = [
+            p for p in episode_files
+            if _episode_index_from_file(p) in _episodes_index
+        ]
+        print(
+            f"[2026-05-13] Filtered FAST tokenizer episode files by config episodes_index: "
+            f"{_before} -> {len(episode_files)}"
+        )
+    else:
+        print(f"Using all {len(episode_files)} episodes")
     
     if max_episodes is not None:
         episode_files = episode_files[:max_episodes]

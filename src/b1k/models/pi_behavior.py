@@ -1466,6 +1466,39 @@ class PiBehavior(_model.BaseModel):
         losses['subtask'] = subtask_logits  # stage logit (나중에 cross-entropy 계산)
         losses["action_loss"] = jnp.mean(losses["flow"], axis=-1)  # [B]
 
+        # [2026-05-13 추가] FAST auxiliary next-token prediction loss
+        # embed_prefix()에서 FAST token 입력은 [BOS, fast_tokens[:, :-1]]로 shift되어 prefix 마지막에 붙는다.
+        # 따라서 prefix_out의 마지막 T개 hidden state로 원래 fast_tokens를 예측하는 cross-entropy를 계산한다.
+        if (
+            train
+            and self.config.use_fast_auxiliary
+            and observation.fast_tokens is not None
+            and observation.fast_token_mask is not None
+        ):
+            fast_targets = observation.fast_tokens.astype(jnp.int32)       # [B, T]
+            fast_mask = observation.fast_token_mask.astype(actions.dtype)  # [B, T]
+            fast_token_len = fast_targets.shape[1]
+
+            # FAST token들이 prefix sequence의 마지막에 append되어 있으므로 마지막 T개를 사용
+            fast_hidden = prefix_out[:, -fast_token_len:, :]               # [B, T, 2048]
+            fast_logits = self.fast_token_proj(fast_hidden)                # [B, T, vocab_size]
+
+            fast_log_probs = jax.nn.log_softmax(fast_logits, axis=-1)
+            fast_token_loss = -jnp.take_along_axis(
+                fast_log_probs,
+                fast_targets[..., None],
+                axis=-1,
+            ).squeeze(-1)                                                  # [B, T]
+
+            fast_denom = jnp.maximum(jnp.sum(fast_mask, axis=-1), 1.0)     # [B]
+            fast_loss = jnp.sum(fast_token_loss * fast_mask, axis=-1) / fast_denom
+
+            losses["fast"] = fast_loss
+            losses["fast_loss"] = fast_loss
+        else:
+            losses["fast"] = jnp.zeros((batch_size,), dtype=actions.dtype)
+            losses["fast_loss"] = jnp.zeros((batch_size,), dtype=actions.dtype)
+
         subtask_loss_value = 0.0
         if train and observation.tokenized_prompt.shape[1] > 1:
             # 정답 stage는 tokenized_prompt[:, 1]에 들어 있다.
@@ -1532,6 +1565,10 @@ class PiBehavior(_model.BaseModel):
             # [B] -> [B, 1]
             # flow loss와 shape을 맞춰 안전하게 더한다.
             fast_loss = fast_loss[:, None]
+
+            # [2026-05-13 추가] W&B 로깅용 FAST auxiliary loss key
+            # 기존에는 losses["fast"]만 있어서 train.py의 minimal payload에서 fast_loss가 안 잡힐 수 있었다.
+            losses["fast_loss"] = jnp.squeeze(fast_loss, axis=-1)
 
             total_loss = total_loss + self.config.fast_loss_weight * fast_loss
 

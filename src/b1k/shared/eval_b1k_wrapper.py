@@ -40,6 +40,475 @@ from b1k.shared.proprioception_indices import PROPRIOCEPTION_INDICES
 
 logger = logging.getLogger(__name__)
 
+# [2026-05-20 추가] 1등팀 wrapper 스타일 로그 필터
+class _B1KFirstTeamStyleLogFilter(logging.Filter):
+    def filter(self, record):
+        try:
+            import os as _os
+            import re as _re
+
+            if _os.environ.get("B1K_FIRSTTEAM_LOG_STYLE", "1") != "1":
+                return True
+
+            msg = record.getMessage()
+
+            # action 수치 로그는 숨김
+            noisy_prefixes = (
+                "[ACTION DEBUG]",
+                "[ACTION_DEBUG]",
+                "[DEEP_ACTION_DEBUG]",
+                "[DEEP_ACTION_DEBUG_RAW]",
+                "[DEEP_ACTION_DEBUG_ACTION]",
+                "[DEEP_ACTION_DEBUG_SPLIT]",
+                "[DEEP_ACTION_DEBUG_STATS]",
+                "[DEEP_ACTION_DEBUG_LAST_ACTIONS]",
+                "[DEEP_ACTION_DEBUG_INITIAL]",
+                "[eval_1stlike_v17]",
+            )
+            if any(msg.startswith(p) for p in noisy_prefixes):
+                return False
+
+            # 기존 Local task 형식 step 로그는 숨기고, 아래 first-team style progress 로그만 남김
+            if msg.startswith("📊 Step ") and "Local task:" in msg:
+                return False
+
+            # stage 로그를 1등팀 스타일로 통일
+            m = _re.search(
+                r"Stage advanced:\s*(\d+)\s*(?:->|→)\s*(\d+).*?(?:global task|task)\s*(\d+).*?step\s*(\d+)",
+                msg,
+            )
+            if m:
+                a, b, task, step = m.groups()
+                record.msg = f"⬆️  Stage advanced: {a} → {b} (task {task}, step {step})"
+                record.args = ()
+                return True
+
+            m = _re.search(
+                r"Stage went back:\s*(\d+)\s*(?:->|→)\s*(\d+).*?(?:global task|task)\s*(\d+).*?step\s*(\d+)",
+                msg,
+            )
+            if m:
+                a, b, task, step = m.groups()
+                record.msg = f"⬅️  Stage went back: {a} → {b} (task {task}, step {step})"
+                record.args = ()
+                return True
+
+            m = _re.search(
+                r"Stage skipped:\s*(\d+)\s*(?:->|→)\s*(\d+).*?(?:global task|task)\s*(\d+).*?step\s*(\d+)",
+                msg,
+            )
+            if m:
+                a, b, task, step = m.groups()
+                record.msg = f"⏭️  Stage skipped: {a} → {b} (task {task}, step {step})"
+                record.args = ()
+                return True
+
+            return True
+        except Exception:
+            return True
+
+
+def _b1k_firstteam_style_progress_log(self):
+    """1등팀 wrapper와 같은 위치/형식의 progress log."""
+    import os as _os
+
+    if _os.environ.get("B1K_FIRSTTEAM_LOG_STYLE", "1") != "1":
+        return
+
+    step = int(getattr(self, "step_count", 0))
+    if step <= 0 or step % 100 != 0:
+        return
+
+    if getattr(self, "_b1k_last_firstteam_progress_step", None) == step:
+        return
+    self._b1k_last_firstteam_progress_step = step
+
+    task_id = getattr(self, "task_id", None)
+    if task_id is None:
+        task_id = getattr(self, "current_task_id", None)
+    if task_id is None:
+        task_id = getattr(self, "_current_task_id", None)
+
+    stage = getattr(self, "current_stage", None)
+    if stage is None:
+        stage = getattr(self, "stage", None)
+    if stage is None:
+        stage = 0
+
+    pred = getattr(self, "prediction_count", None)
+    if pred is None:
+        pred = getattr(self, "predictions", None)
+    if pred is None:
+        pred = "?"
+
+    max_stage = None
+    try:
+        from b1k.models.pi_behavior_config import TASK_NUM_STAGES
+        if task_id is not None:
+            max_stage = TASK_NUM_STAGES[int(task_id)] - 1
+    except Exception:
+        max_stage = None
+
+    stage_text = f"{stage}/{max_stage}" if max_stage is not None else f"{stage}/?"
+
+    logger.info(
+        f"📊 Step {step} | Task: {task_id} | Stage: {stage_text} | Predictions: {pred}"
+    )
+
+
+if not any(isinstance(f, _B1KFirstTeamStyleLogFilter) for f in logger.filters):
+    logger.addFilter(_B1KFirstTeamStyleLogFilter())
+
+
+# [2026-05-20 추가] 1등팀 스타일 로그 필터 + 진행 로그
+class _B1KTeamStyleLogFilter(logging.Filter):
+    def filter(self, record):
+        try:
+            import os as _os
+            import re as _re
+
+            if _os.environ.get("B1K_TEAMSTYLE_LOGS", "1") != "1":
+                return True
+
+            msg = record.getMessage()
+
+            # action 수치 로그 제거
+            noisy_prefixes = (
+                "[ACTION DEBUG]",
+                "[ACTION_DEBUG]",
+                "[DEEP_ACTION_DEBUG]",
+                "[DEEP_ACTION_DEBUG_RAW]",
+                "[DEEP_ACTION_DEBUG_ACTION]",
+                "[DEEP_ACTION_DEBUG_SPLIT]",
+                "[DEEP_ACTION_DEBUG_STATS]",
+                "[DEEP_ACTION_DEBUG_LAST_ACTIONS]",
+                "[DEEP_ACTION_DEBUG_INITIAL]",
+                "[eval_1stlike_v17]",
+            )
+            if any(msg.startswith(p) for p in noisy_prefixes):
+                return False
+
+            # 기존 우리 progress 로그는 teamstyle progress helper가 다시 찍게 숨김
+            if msg.startswith("📊 Step ") and "Local task:" in msg:
+                return False
+
+            # stage 로그를 1등팀 스타일로 변환
+            m = _re.search(
+                r"Stage advanced:\s*(\d+)\s*(?:->|→)\s*(\d+).*?(?:global task|task)\s*(\d+).*?step\s*(\d+)",
+                msg,
+            )
+            if m:
+                a, b, task, step = m.groups()
+                record.msg = f"⬆️  Stage advanced: {a} → {b} (task {task}, step {step})"
+                record.args = ()
+                return True
+
+            m = _re.search(
+                r"Stage went back:\s*(\d+)\s*(?:->|→)\s*(\d+).*?(?:global task|task)\s*(\d+).*?step\s*(\d+)",
+                msg,
+            )
+            if m:
+                a, b, task, step = m.groups()
+                record.msg = f"⬅️  Stage went back: {a} → {b} (task {task}, step {step})"
+                record.args = ()
+                return True
+
+            m = _re.search(
+                r"Stage skipped:\s*(\d+)\s*(?:->|→)\s*(\d+).*?(?:global task|task)\s*(\d+).*?step\s*(\d+)",
+                msg,
+            )
+            if m:
+                a, b, task, step = m.groups()
+                record.msg = f"⏭️  Stage skipped: {a} → {b} (task {task}, step {step})"
+                record.args = ()
+                return True
+
+            return True
+        except Exception:
+            return True
+
+
+def _b1k_get_attr_any(obj, names, default=None):
+    for name in names:
+        if hasattr(obj, name):
+            value = getattr(obj, name)
+            if value is not None:
+                return value
+    return default
+
+
+def _b1k_teamstyle_progress_log(self):
+    """1등팀 스타일 진행 로그.
+    예: 📊 Step 100 | Task: 19 | Stage: 0/11 | Predictions: 5
+    """
+    if os.environ.get("B1K_TEAMSTYLE_LOGS", "1") != "1":
+        return
+
+    try:
+        every = int(os.environ.get("B1K_TEAMSTYLE_PROGRESS_EVERY", "100"))
+    except Exception:
+        every = 100
+
+    step = int(getattr(self, "step_count", 0))
+    if every > 0 and step % every != 0:
+        return
+
+    # 같은 step 중복 출력 방지
+    if getattr(self, "_b1k_last_teamstyle_progress_step", None) == step:
+        return
+    self._b1k_last_teamstyle_progress_step = step
+
+    task_id = _b1k_get_attr_any(
+        self,
+        ["task_id", "current_task_id", "_current_task_id", "global_task_id", "local_task_id"],
+        None,
+    )
+
+    stage = _b1k_get_attr_any(
+        self,
+        ["current_stage", "stage", "_current_stage"],
+        0,
+    )
+
+    # max stage 후보들. 없으면 ? 로 둔다.
+    max_stage = _b1k_get_attr_any(
+        self,
+        ["max_stage", "max_stages", "num_stages", "n_stages", "_max_stage", "_max_stages"],
+        None,
+    )
+
+    # task별 stage table이 있는 경우 최대한 읽기
+    if max_stage is None:
+        for name in ["task_max_stages", "max_stages_by_task", "stage_counts", "_task_max_stages"]:
+            if hasattr(self, name):
+                table = getattr(self, name)
+                try:
+                    if task_id in table:
+                        max_stage = table[task_id]
+                        break
+                except Exception:
+                    pass
+
+    prediction = _b1k_get_attr_any(
+        self,
+        ["prediction_count", "predictions", "_prediction_count"],
+        None,
+    )
+
+    stage_text = f"{stage}/{max_stage}" if max_stage is not None else f"{stage}/?"
+    pred_text = prediction if prediction is not None else "?"
+
+    logger.info(
+        f"📊 Step {step} | Task: {task_id} | Stage: {stage_text} | Predictions: {pred_text}"
+    )
+
+
+if not any(isinstance(f, _B1KTeamStyleLogFilter) for f in logger.filters):
+    logger.addFilter(_B1KTeamStyleLogFilter())
+
+
+def _b1k_compact_action_debug_log(self, current_action):
+    """[2026-05-20 추가] 1등팀 기본 ACTION_DEBUG 스타일의 compact logger.
+
+    출력 예:
+    [ACTION_DEBUG] step=50 task=5 norm=... base=[...] arm_mean_abs=... gripper22=...
+    """
+    if os.environ.get("B1K_COMPACT_ACTION_DEBUG", "1") != "1":
+        return
+
+    try:
+        every = int(os.environ.get("B1K_COMPACT_ACTION_DEBUG_EVERY", "50"))
+    except Exception:
+        every = 50
+
+    step = int(getattr(self, "step_count", 0))
+    if every > 0 and step % every != 0:
+        return
+
+    try:
+        action = np.asarray(current_action)
+
+        task_id = getattr(self, "task_id", None)
+        if task_id is None:
+            task_id = getattr(self, "current_task_id", None)
+        if task_id is None:
+            task_id = getattr(self, "_current_task_id", None)
+
+        if action.ndim >= 1 and action.shape[0] >= 23:
+            arms = np.concatenate([action[7:14], action[15:22]])
+            arm_mean_abs = float(np.mean(np.abs(arms)))
+            base = np.array2string(action[0:3], precision=4, suppress_small=True)
+            gripper22 = float(action[22])
+            norm = float(np.linalg.norm(action))
+
+            logger.info(
+                f"[ACTION_DEBUG] step={step} task={task_id} "
+                f"norm={norm:.6f} base={base} "
+                f"arm_mean_abs={arm_mean_abs:.6f} gripper22={gripper22}"
+            )
+    except Exception as e:
+        logger.warning(f"[ACTION_DEBUG] compact log failed: {e}")
+
+
+def _b1k_deep_action_debug_log(self, current_action, raw_action=None):
+    """[2026-05-18 추가] 1등팀 로그 형식에 맞춘 deep action debug logger.
+
+    출력:
+    - DEEP_ACTION_DEBUG
+    - DEEP_ACTION_DEBUG_RAW
+    - DEEP_ACTION_DEBUG_ACTION
+    - DEEP_ACTION_DEBUG_SPLIT
+    - DEEP_ACTION_DEBUG_STATS
+    - DEEP_ACTION_DEBUG_LAST_ACTIONS
+    - DEEP_ACTION_DEBUG_INITIAL
+
+    주의:
+    - action 자체는 수정하지 않고 로그만 찍는다.
+    - self 내부에 last_actions / initial_actions 계열 attribute가 있으면 같이 출력한다.
+    """
+    if os.environ.get("B1K_DEEP_ACTION_DEBUG", "0") != "1":
+        return
+
+    try:
+        every = int(os.environ.get("B1K_DEEP_ACTION_DEBUG_EVERY", "20"))
+    except Exception:
+        every = 20
+
+    step = int(getattr(self, "step_count", 0))
+    if every > 0 and step % every != 0:
+        return
+
+    try:
+        np.set_printoptions(precision=4, suppress=True)
+
+        action = np.asarray(current_action)
+        raw = None if raw_action is None else np.asarray(raw_action)
+
+        task_id = getattr(self, "task_id", None)
+        if task_id is None:
+            task_id = getattr(self, "current_task_id", None)
+        if task_id is None:
+            task_id = getattr(self, "_current_task_id", None)
+
+        stage = getattr(self, "current_stage", None)
+        if stage is None:
+            stage = getattr(self, "stage", None)
+
+        prediction = getattr(self, "prediction_count", None)
+        if prediction is None:
+            prediction = getattr(self, "predictions", None)
+
+        action_index = getattr(self, "action_index", None)
+        if action_index is None:
+            action_index = getattr(self, "_action_index", 0)
+
+        logger.info(
+            "[DEEP_ACTION_DEBUG] "
+            f"step={step} task={task_id} stage={stage} "
+            f"prediction={prediction} action_index={action_index} "
+            f"shape={action.shape}"
+        )
+
+        if raw is not None and raw.ndim >= 1 and os.environ.get("B1K_DEEP_LOG_RAW", "1") == "1":
+            logger.info(
+                "[DEEP_ACTION_DEBUG_RAW] "
+                f"raw_0_22={np.array2string(raw[:23], precision=4, suppress_small=True)}"
+            )
+
+        logger.info(
+            "[DEEP_ACTION_DEBUG_ACTION] "
+            f"action_0_22={np.array2string(action[:23], precision=4, suppress_small=True)}"
+        )
+
+        if action.ndim >= 1 and action.shape[0] >= 23:
+            logger.info(
+                "[DEEP_ACTION_DEBUG_SPLIT] "
+                f"base_0_1_2={np.array2string(action[0:3], precision=4, suppress_small=True)} "
+                f"torso_3_6={np.array2string(action[3:7], precision=4, suppress_small=True)} "
+                f"left_arm_7_13={np.array2string(action[7:14], precision=4, suppress_small=True)} "
+                f"left_gripper_14={float(action[14]):.4f} "
+                f"right_arm_15_21={np.array2string(action[15:22], precision=4, suppress_small=True)} "
+                f"right_gripper_22={float(action[22]):.4f}"
+            )
+
+            logger.info(
+                "[DEEP_ACTION_DEBUG_STATS] "
+                f"base_min={float(action[0:3].min()):.4f} "
+                f"base_max={float(action[0:3].max()):.4f} "
+                f"left_arm_min={float(action[7:14].min()):.4f} "
+                f"left_arm_max={float(action[7:14].max()):.4f} "
+                f"right_arm_min={float(action[15:22].min()):.4f} "
+                f"right_arm_max={float(action[15:22].max()):.4f} "
+                f"all_min={float(action.min()):.4f} "
+                f"all_max={float(action.max()):.4f} "
+                f"norm={float(np.linalg.norm(action)):.4f}"
+            )
+
+        # 1등팀 로그의 last_actions_shape / first / current / last 최대한 따라가기
+        last_actions = None
+        for name in (
+            "last_actions",
+            "_last_actions",
+            "actions",
+            "_actions",
+            "action_queue",
+            "_action_queue",
+            "action_buffer",
+            "_action_buffer",
+            "last_action_chunk",
+            "_last_action_chunk",
+        ):
+            if hasattr(self, name):
+                candidate = getattr(self, name)
+                if candidate is not None:
+                    arr = np.asarray(candidate)
+                    if arr.ndim == 2 and arr.shape[-1] >= 23 and arr.shape[0] > 0:
+                        last_actions = arr
+                        break
+
+        if last_actions is not None:
+            try:
+                idx = int(action_index)
+            except Exception:
+                idx = 0
+            idx = max(0, min(idx, last_actions.shape[0] - 1))
+
+            logger.info(
+                "[DEEP_ACTION_DEBUG_LAST_ACTIONS] "
+                f"last_actions_shape={last_actions.shape} "
+                f"first={np.array2string(last_actions[0, :23], precision=4, suppress_small=True)} "
+                f"current={np.array2string(last_actions[idx, :23], precision=4, suppress_small=True)} "
+                f"last={np.array2string(last_actions[-1, :23], precision=4, suppress_small=True)}"
+            )
+
+        # 1등팀 로그의 next_initial_actions_shape / tail_keep 형식
+        initial_actions = None
+        for name in (
+            "initial_actions",
+            "_initial_actions",
+            "next_initial_actions",
+            "_next_initial_actions",
+        ):
+            if hasattr(self, name):
+                candidate = getattr(self, name)
+                if candidate is not None:
+                    arr = np.asarray(candidate)
+                    if arr.ndim == 2 and arr.shape[-1] >= 23 and arr.shape[0] > 0:
+                        initial_actions = arr
+                        break
+
+        if initial_actions is not None:
+            keep = min(4, initial_actions.shape[0])
+            logger.info(
+                "[DEEP_ACTION_DEBUG_INITIAL] "
+                f"next_initial_actions_shape={initial_actions.shape} "
+                f"tail_keep={np.array2string(initial_actions[-keep:, :23], precision=4, suppress_small=True)}"
+            )
+
+    except Exception as e:
+        logger.warning(f"[DEEP_ACTION_DEBUG] failed: {e}")
+
+
 RESIZE_SIZE = 224
 
 # ============================================================
@@ -1864,7 +2333,13 @@ class B1KPolicyWrapper():
             current_action[14] = np.clip(g14, -gripper_max, gripper_max)
             current_action[22] = np.clip(g22, -gripper_max, gripper_max)
 
-            if self.step_count % 20 == 0:
+            _b1k_deep_action_debug_log(self, current_action, raw_action=raw_action)
+
+            _b1k_compact_action_debug_log(self, current_action)
+
+
+
+            if os.environ.get("B1K_VERBOSE_ACTION_DEBUG", "0") == "1" and self.step_count % int(os.environ.get("B1K_VERBOSE_ACTION_DEBUG_EVERY", "20")) == 0:
                 logger.info(
                     f"[eval_1stlike_v17] "
                     f"step={self.step_count}, "
@@ -1934,7 +2409,7 @@ class B1KPolicyWrapper():
         # 1) arm action 값이 거의 0인 것인지
         # 2) 우리가 arm이라고 생각한 current_action[3:-1]이 실제 팔 channel이 아닌 것인지
         # 확인하기 위한 로그다.
-        if self.step_count % 20 == 0:
+        if os.environ.get("B1K_VERBOSE_ACTION_DEBUG", "0") == "1" and self.step_count % int(os.environ.get("B1K_VERBOSE_ACTION_DEBUG_EVERY", "20")) == 0:
             raw_action = self.last_actions[self.action_index]
             logger.info(
                 "[ACTION DEBUG] "
@@ -1956,9 +2431,21 @@ class B1KPolicyWrapper():
         self.action_index += 1
         self.step_count += 1
         
-        # Log progress every 100 steps
+        # Log progress every 100 steps - 1st team style
         if self.step_count % 100 == 0:
-            logger.info(f"📊 Step {self.step_count} | Local task: {self.task_id} | Predictions: {self.prediction_count}")
+            try:
+                if self.local_task_id is not None:
+                    max_stage = TASK_NUM_STAGES[int(self.local_task_id)] - 1
+                else:
+                    max_stage = "?"
+            except Exception:
+                max_stage = "?"
+
+            logger.info(
+                f"📊 Step {self.step_count} | Task: {self.task_id} | "
+                f"Stage: {self.current_stage}/{max_stage} | "
+                f"Predictions: {self.prediction_count}"
+            )
         
         # Convert to torch tensor
         action_tensor = torch.from_numpy(current_action).float()

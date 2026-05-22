@@ -1225,6 +1225,53 @@ _CONFIGS.append(
     )
 )
 
+
+# [2026-05-13 추가] behavior-v2 flow1 config
+# OOM 회피용: correlated noise / FAST auxiliary / KV transform / subtask loss는 유지하고
+# multi-flow만 num_flow_samples=2 -> 1로 낮춘 버전
+_CONFIGS.append(
+    dataclasses.replace(
+        next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_behavior_v2"),
+        name="pi_behavior_b1k_a100_behavior_v2_flow1",
+        exp_name="a100_behavior_v2_flow1",
+        num_flow_samples=1,
+        batch_size=28,
+        num_workers=6,
+        num_train_steps=70_000,
+        overwrite=False,
+        resume=False,
+    )
+)
+
+
+# [2026-05-13 추가] behavior-v2 flow1 batch16 config
+# OOM 회피용: correlated noise / FAST auxiliary / KV transform / subtask loss 유지
+# num_flow_samples=1, batch_size=16
+_CONFIGS.append(
+    dataclasses.replace(
+        next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_behavior_v2_flow1"),
+        name="pi_behavior_b1k_a100_behavior_v2_flow1_bs16",
+        exp_name="a100_behavior_v2_flow1_bs16",
+        batch_size=16,
+        num_workers=6,
+        overwrite=False,
+        resume=False,
+    )
+)
+
+# [2026-05-13 추가] behavior-v2 flow1 batch8 fallback config
+_CONFIGS.append(
+    dataclasses.replace(
+        next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_behavior_v2_flow1"),
+        name="pi_behavior_b1k_a100_behavior_v2_flow1_bs8",
+        exp_name="a100_behavior_v2_flow1_bs8",
+        batch_size=8,
+        num_workers=4,
+        overwrite=False,
+        resume=False,
+    )
+)
+
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
