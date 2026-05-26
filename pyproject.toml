@@ -1,7 +1,7 @@
 [project]
-name = "b1k-solution"
+name = "behavior1k-lightweight-baseline"
 version = "0.1.0"
-description = "BEHAVIOR-1K solution based on OpenPI"
+description = "Lightweight BEHAVIOR-1K baseline: 70k steps, batch 16, single flow sample"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 

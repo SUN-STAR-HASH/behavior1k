@@ -17,3 +17,10 @@ eval_logs/
 eval_logs_*/
 eval_selected12_*.log
 *.mp4
+
+# README-facing evaluation media.
+!assets/
+!assets/results/
+!assets/results/**
+!assets/videos/
+!assets/videos/**

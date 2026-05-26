@@ -1,0 +1,14 @@
+task_id,task_name,instance_id,first_team_q_score,first_team_accuracy,lightweight_q_score,lightweight_accuracy
+00,turning_on_radio,295,0.000,0,0.000,0
+01,picking_up_trash,67,0.000,0,0.000,0
+05,setting_mousetraps,296,0.333,0,0.000,0
+11,putting_dishes_away_after_cleaning,173,0.000,0,0.000,0
+12,preparing_lunch_box,214,0.000,0,0.000,0
+19,outfit_a_basic_toolbox,43,0.000,0,0.000,0
+22,putting_shoes_on_rack,282,0.100,0,0.000,0
+31,clean_boxing_gloves,265,0.000,0,0.000,0
+39,spraying_fruit_trees,160,0.000,0,0.000,0
+40,make_microwave_popcorn,222,1.000,1,0.000,0
+45,cook_hot_dogs,158,0.000,0,0.000,0
+46,cook_bacon,210,0.000,0,0.000,0
+mean,mean,,0.119,0.083,0.000,0.000

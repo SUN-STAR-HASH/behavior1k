@@ -441,8 +441,11 @@ _CONFIGS = [
     ),
 
     # ------------------------------------------------------------------
-    # 1) 본 baseline
-    # pi0 backbone + 12개 task embedding + flow matching only
+    # 1) 공개 README 기준 경량 baseline
+    # 1등팀 구조는 유지하고, 사용자가 지정한 세 가지 학습 규모만 낮춘다.
+    #   - num_train_steps: 200k -> 70k
+    #   - batch_size: 2048 -> 16
+    #   - num_flow_samples: 15 -> 1
     # ------------------------------------------------------------------
     TrainConfig(
         name="pi_behavior_b1k_baseline",
@@ -452,17 +455,16 @@ _CONFIGS = [
             action_horizon=30,
             action_dim=32,
 
-            # ---- baseline ----
-            use_correlated_noise=False,
-            correlation_beta=0.0,
-
-            use_fast_auxiliary=False,
-            fast_loss_weight=0.0,
-
-            use_kv_transform=False,
+            use_correlated_noise=True,
+            correlation_beta=0.5,
+            use_fast_auxiliary=True,
+            fast_loss_weight=0.05,
+            fast_encoded_dims="0:6,7:23",
+            fast_vocab_size=1024,
+            max_fast_tokens=200,
+            use_kv_transform=True,
             use_knowledge_insulation=False,
-
-            subtask_loss_weight=0.0,
+            subtask_loss_weight=0.1,
             freeze_vision_backbone=True,
         ),
         data=LeRobotB1KDataConfig(
@@ -470,10 +472,11 @@ _CONFIGS = [
             base_config=DataConfig(
                 prompt_from_task=False,
                 behavior_dataset_root="~/data/behavior_224_rgb",
-                use_per_timestamp_norm=False,
+                use_per_timestamp_norm=True,
             ),
-            use_delta_joint_actions=False,
-            use_fast_tokenization=False,
+            use_delta_joint_actions=True,
+            use_fast_tokenization=True,
+            use_stage_conditioning=True,
         ),
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1000,
@@ -485,7 +488,7 @@ _CONFIGS = [
         weight_loader=weight_loaders.PiBehaviorWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_base/params"
         ),
-        num_train_steps=30_000,
+        num_train_steps=70_000,
         assets_base_dir="./outputs/assets",
         checkpoint_base_dir="./outputs/checkpoints",
         num_workers=8,
@@ -886,12 +889,12 @@ _CONFIGS = [
 
 ]
 
-# [2026-04-18] A100 smoke 기반 batch_size=8 확인용 짧은 테스트
+# [2026-04-18] A100 smoke 기반 batch_size 확인용 짧은 테스트
 _smoke_cfg = next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_smoke")
 
-# [2026-04-19 수정]
+# [2026-05-26 정리]
 # 목적:
-# - bs16은 성공했고 bs32는 OOM이었으므로, 그 중간값인 bs20이 안정적으로 도는지 확인
+# - 공개 baseline 기준인 batch_size=16 조건이 짧은 smoke에서도 안정적으로 도는지 확인
 # - 이번 run은 학습 성능보다 OOM 여부 / 짧은 구간 안정성 확인이 목적
 # 설정 이유:
 # - num_train_steps=20으로 짧게 두어 위험도를 낮춤
@@ -899,8 +902,8 @@ _smoke_cfg = next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_smoke")
 _CONFIGS.append(
     dataclasses.replace(
         _smoke_cfg,
-        name="pi_behavior_b1k_a100_smoke_bs28_w8_check",
-        exp_name="a100_smoke_bs28_w8_check",
+        name="pi_behavior_b1k_a100_smoke_bs16_w8_check",
+        exp_name="a100_smoke_bs16_w8_check",
         data=dataclasses.replace(
             _smoke_cfg.data,
             assets=AssetsConfig(
@@ -908,7 +911,7 @@ _CONFIGS.append(
                 asset_id="IliaLarchenko/behavior_224_rgb",
             ),
         ),
-        batch_size=28,
+        batch_size=16,
         num_workers=8,
         num_train_steps=20,
         log_interval=1,
@@ -930,12 +933,32 @@ _CONFIGS.append(
         _smoke_cfg,
         name="pi_behavior_b1k_a100_baseline_draft",
         exp_name="a100_baseline_draft",
+        model=dataclasses.replace(
+            _smoke_cfg.model,
+            use_correlated_noise=True,
+            correlation_beta=0.5,
+            use_fast_auxiliary=True,
+            fast_loss_weight=0.05,
+            fast_encoded_dims="0:6,7:23",
+            fast_vocab_size=1024,
+            max_fast_tokens=200,
+            use_kv_transform=True,
+            use_knowledge_insulation=False,
+            subtask_loss_weight=0.1,
+        ),
         data=dataclasses.replace(
             _smoke_cfg.data,
             assets=AssetsConfig(
                 assets_dir="/home/data/projects/behavior1k/outputs/assets/pi_behavior_b1k_a100_smoke",
                 asset_id="IliaLarchenko/behavior_224_rgb",
             ),
+            base_config=dataclasses.replace(
+                _smoke_cfg.data.base_config,
+                use_per_timestamp_norm=True,
+            ),
+            use_delta_joint_actions=True,
+            use_fast_tokenization=True,
+            use_stage_conditioning=True,
         ),
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1000,
@@ -943,7 +966,7 @@ _CONFIGS.append(
             decay_steps=20_000,
             decay_lr=1e-5,
         ),
-        batch_size=28,   # [2026-04-19 수정] bs8 -> bs28
+        batch_size=16,   # [2026-05-26 정리] 공개 baseline 기준: 2048 -> 16
         num_workers=6,   # [2026-04-19 수정] w4 -> w6
         num_train_steps=70_000, # [2026-04-22 수정] train_steps=30_000 -> train_steps=70_000
         log_interval=10,
@@ -973,7 +996,7 @@ _CONFIGS.append(
             decay_steps=20_000,
             decay_lr=1e-5,
         ),
-        batch_size=28,
+        batch_size=16,
         num_workers=6,
         num_train_steps=30,
         save_interval=30,
@@ -987,7 +1010,7 @@ _CONFIGS.append(
 
 # [2026-04-19 수정] 본 실험과 동일 조건의 1000-step pilot
 # - step만 1000으로 줄이고 나머지는 baseline draft와 동일
-# - bs28, w6 조건을 그대로 재사용
+# - bs16, w6 조건을 그대로 재사용
 _baseline_cfg = next(c for c in _CONFIGS if c.name == "pi_behavior_b1k_a100_baseline_draft")
 
 _CONFIGS.append(
@@ -1038,7 +1061,7 @@ _CONFIGS.append(
             use_stage_conditioning=True,
         ),
         num_train_steps=70_000,
-        batch_size=28,
+        batch_size=16,
         num_workers=6,
         overwrite=False,
         resume=False,
@@ -1068,7 +1091,7 @@ _CONFIGS.append(
             decay_steps=20_000,
             decay_lr=1e-5,
         ),
-        batch_size=28,
+        batch_size=16,
         num_workers=6,
         num_train_steps=70_000,
         log_interval=10,
@@ -1105,7 +1128,7 @@ assets_dir="/home/data/projects/behavior1k/outputs/assets/pi_behavior_b1k_a100_s
             decay_steps=20_000,
             decay_lr=1e-5,
         ),
-        batch_size=28,
+        batch_size=16,
         num_workers=6,
         num_train_steps=20,
         log_interval=1,
