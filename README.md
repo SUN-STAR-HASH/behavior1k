@@ -75,6 +75,12 @@ Accuracy는 `q_score.final == 1.0`이면 1, 아니면 0으로 계산했습니다
 
 상세 task별 수치는 [`results/selected12_lightweight_baseline_eval.csv`](results/selected12_lightweight_baseline_eval.csv)에 정리했습니다.
 
+## Capstone Presentation
+
+중간발표 PPT도 GitHub에서 내려받을 수 있게 추가했습니다. 원본은 A1 포스터 크기의 단일 슬라이드였기 때문에, repo에는 A4급 portrait 크기로 줄인 compact 버전을 넣었습니다.
+
+- [Capstone midterm presentation compact PPTX](docs/presentation/capstone_midterm_presentation_compact.pptx)
+
 ## Result Interpretation
 
 이번 결과는 “모델 구조가 완전히 틀렸다”는 결론이라기보다, 1등팀 구조를 유지하더라도 **70k step, batch 16, flow sample 1** 수준으로 줄이면 BEHAVIOR-1K의 긴 조작 task를 안정적으로 완료하기 어렵다는 기준선을 보여줍니다.
@@ -107,6 +113,7 @@ scripts/
 assets/
   results/                  README용 평가 이미지
   videos/                   대표 비교 영상
+docs/presentation/          compact 중간발표 PPTX
 
 BEHAVIOR-1K/                공식 BEHAVIOR-1K / OmniGibson 코드
 openpi/                     OpenPI dependency
