@@ -259,8 +259,6 @@ RTX 5070은 OmniGibson / Isaac Sim 실행과 평가에 사용하고, A100은 JAX
 
 ## Next Steps
 
-중간발표 PPT의 `향후 계획` 내용을 기준으로 정리했습니다.
-
 ### 1. 학습 관련
 
 - 학습 step 증가를 통한 장기 수렴 성능 분석
