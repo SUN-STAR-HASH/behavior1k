@@ -79,7 +79,11 @@ Accuracy는 `q_score.final == 1.0`이면 1, 아니면 0으로 계산했습니다
 
 중간발표 PPT도 GitHub에서 내려받을 수 있게 추가했습니다. 원본은 A1 포스터 크기의 단일 슬라이드였기 때문에, repo에는 A4급 portrait 크기로 줄인 compact 버전을 넣었습니다.
 
+![Capstone midterm presentation preview](docs/presentation/capstone_midterm_presentation_preview.png)
+
 - [Capstone midterm presentation compact PPTX](docs/presentation/capstone_midterm_presentation_compact.pptx)
+
+발표자료는 BEHAVIOR-1K 환경에서 Pi0.5/OpenPI 기반 양팔 로봇 정책을 구현하고, 제한된 GPU 환경에서 경량화 학습과 rollout 평가를 진행한 과정을 한 장짜리 포스터 형식으로 정리한 것입니다. 핵심 비교는 1등팀 대비 `step 200,000 -> 70,000`, `batch size 2048 -> 16`, `flow sample 15 -> 1`로 줄인 lightweight baseline입니다.
 
 ## Result Interpretation
 
@@ -113,7 +117,7 @@ scripts/
 assets/
   results/                  README용 평가 이미지
   videos/                   대표 비교 영상
-docs/presentation/          compact 중간발표 PPTX
+docs/presentation/          compact 중간발표 PPTX 및 preview PNG
 
 BEHAVIOR-1K/                공식 BEHAVIOR-1K / OmniGibson 코드
 openpi/                     OpenPI dependency
@@ -257,13 +261,21 @@ RTX 5070은 OmniGibson / Isaac Sim 실행과 평가에 사용하고, A100은 JAX
 
 ## Next Steps
 
-1. **Longer training**: 70k에서 멈추지 않고 180k~210k까지 확장해 200k reference에 가까운 수렴을 확인합니다.
-2. **Batch / accumulation**: 실제 batch 2048을 바로 쓰기 어렵다면 gradient accumulation 또는 multi-GPU로 effective batch를 키웁니다.
-3. **Flow sample ablation**: `num_flow_samples=1, 3, 5, 15`를 비교해 학습 비용 대비 Q-score 변화를 확인합니다.
-4. **Recovery learning**: 실패 rollout을 기록하고 recovery action을 oversampling합니다. Q-score 또는 stage progress 기반 value head를 붙입니다.
-5. **Instance robustness**: instance별 Q-score를 저장하고, hard instance를 다음 학습에서 더 자주 샘플링합니다.
+중간발표 PPT의 `향후 계획` 내용을 기준으로 정리했습니다.
 
-자세한 개선 계획은 [`docs/improvement_plan.md`](docs/improvement_plan.md)에 정리했습니다.
+### 1. 학습 관련
+
+- 학습 step 증가를 통한 장기 수렴 성능 분석
+- 다양한 seed 기반 반복 실험을 통한 모델 재현성 검증
+- Task 수 확장을 통한 multi-task generalization 성능 분석
+
+### 2. 추가 VLA 기술
+
+- **MeM (Multi-Scale Embodied Memory)**: short-term / long-term memory 기반 long-horizon task 안정성 향상
+- **RD-VLA (Recurrent-Depth VLA)**: latent action plan을 반복적으로 refinement하여 long-horizon task에서 더 정밀한 action trajectory 생성
+- **π*0.6-lite Recovery Learning**: 실패 rollout과 stage/value 정보를 활용하여 OOD 상태에서 recovery behavior 및 rollout robustness 향상
+
+PPT의 향후 계획 정리본은 [`docs/improvement_plan.md`](docs/improvement_plan.md)에 따로 두었습니다.
 
 ## References
 
