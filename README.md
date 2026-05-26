@@ -77,11 +77,9 @@ Accuracy는 `q_score.final == 1.0`이면 1, 아니면 0으로 계산했습니다
 
 ## Capstone Presentation
 
-중간발표 PPT도 GitHub에서 내려받을 수 있게 추가했습니다. 원본은 A1 포스터 크기의 단일 슬라이드였기 때문에, repo에는 A4급 portrait 크기로 줄인 compact 버전을 넣었습니다.
 
 ![Capstone midterm presentation preview](docs/presentation/capstone_midterm_presentation_preview.png)
 
-- [Capstone midterm presentation compact PPTX](docs/presentation/capstone_midterm_presentation_compact.pptx)
 
 발표자료는 BEHAVIOR-1K 환경에서 Pi0.5/OpenPI 기반 양팔 로봇 정책을 구현하고, 제한된 GPU 환경에서 경량화 학습과 rollout 평가를 진행한 과정을 한 장짜리 포스터 형식으로 정리한 것입니다. 핵심 비교는 1등팀 대비 `step 200,000 -> 70,000`, `batch size 2048 -> 16`, `flow sample 15 -> 1`로 줄인 lightweight baseline입니다.
 
