@@ -140,49 +140,6 @@ def build_minimal_wandb_payload(
 
     return payload
 
-# [2026-04-19 수정]
-# 목적:
-# - 기존에는 "현재 시점의 GPU 메모리"만 찍었음
-# - 이제는 실행 중 관측된 최대값(peak_seen)도 같이 기록해서
-#   bs16 테스트에서 어느 구간이 가장 위험한지 바로 확인하려는 용도
-_GPU_MEM_PEAK_MIB = 0
-
-def reset_gpu_mem_peak():
-    """[2026-04-19 수정] peak 추적값을 새 구간 시작 전에 초기화한다."""
-    global _GPU_MEM_PEAK_MIB
-    _GPU_MEM_PEAK_MIB = 0
-
-def log_gpu_mem(tag: str):
-    """[2026-04-19 수정]
-    현재 GPU 메모리 사용량과 지금까지 관측한 최대 사용량(peak_seen)을 함께 로그로 찍는다.
-    """
-    global _GPU_MEM_PEAK_MIB
-    try:
-        out = subprocess.check_output(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.used,memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            text=True,
-        ).strip().splitlines()[0]
-
-        used, total = [int(x.strip()) for x in out.split(",")]
-        _GPU_MEM_PEAK_MIB = max(_GPU_MEM_PEAK_MIB, used)
-
-        logging.info(
-            f"[GPU MEM] {tag}: {used} MiB / {total} MiB "
-            f"(peak_seen={_GPU_MEM_PEAK_MIB} MiB)"
-        )
-    except Exception as e:
-        logging.info(f"[GPU MEM] {tag}: unavailable ({e})")
-
-def block_and_log(tag: str, x=None):
-    """기존과 동일하게 JAX 계산을 끝까지 block한 뒤 GPU 메모리 로그를 찍는다."""
-    if x is not None:
-        jax.block_until_ready(x)
-    log_gpu_mem(tag)
-
 def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shape: at.Params) -> at.Params:
     """Loads and validates the weights. Returns a loaded subset of the weights."""
     loaded_params = loader.load(params_shape)
@@ -458,21 +415,15 @@ def main(config: _config.TrainConfig):
     )
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
-    # [4/9 수정]
-    log_gpu_mem("before data_loader create")
-
     data_loader = _data_loader.create_behavior_data_loader(
         config,
         sharding=data_sharding,
         shuffle=True,
     )
 
-    log_gpu_mem("after data_loader create")
-
     data_iter = iter(data_loader)
     batch = next(data_iter)
 
-    log_gpu_mem("after first batch")
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
     
     ###############################
@@ -504,17 +455,12 @@ def main(config: _config.TrainConfig):
         config, init_rng, mesh, resume=resuming, norm_stats=norm_stats
     )
 
-    block_and_log("after init_train_state", train_state)
     logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
     #################
 
     if resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
         
-        # [4/9 추가]
-        block_and_log("after restore_state", train_state)
-        ##############
-
         # correlation matrix는 norm_stats가 있을 때만 다시 로드
         if norm_stats is not None:
             model = nnx.merge(train_state.model_def, train_state.params)
@@ -533,13 +479,6 @@ def main(config: _config.TrainConfig):
         # lr schedule config 객체 -> 실제 callable schedule 함수
     )
 
-    # [2026-04-19 수정]
-    # 목적:
-    # - 첫 ptrain_step은 보통 compile + 실제 첫 forward/backward가 겹쳐서 메모리 피크가 크게 나타날 수 있음
-    # - 그래서 이 구간만 따로 peak를 초기화하고, 끝난 직후 peak를 요약 출력
-    reset_gpu_mem_peak()
-    log_gpu_mem("before first ptrain_step")
-
     try:
         train_state, info = ptrain_step(train_rng, train_state, batch)
         block_and_log("after first ptrain_step", info["loss"])
@@ -550,11 +489,6 @@ def main(config: _config.TrainConfig):
         raise
 
     start_step = int(train_state.step)
-
-    # [2026-04-19 수정]
-    # 목적:
-    # - 첫 ptrain_step peak와, 이후 train loop 전체 peak를 분리해서 보기 위함
-    reset_gpu_mem_peak()
 
     pbar = tqdm.tqdm(
         range(start_step, config.num_train_steps),
@@ -573,12 +507,6 @@ def main(config: _config.TrainConfig):
         step_time_sec = time.time() - step_start_time
         infos.append(info)
         
-        # [2026-04-19 수정]
-        # 목적:
-        # - 각 step 직후 메모리 사용량을 남겨서
-        #   bs16에서 특정 step부터 급격히 증가하는지 확인
-        block_and_log(f"step {step}", info["loss"])
-
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
