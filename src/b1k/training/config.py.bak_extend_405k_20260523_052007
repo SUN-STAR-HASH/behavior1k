@@ -1254,9 +1254,6 @@ _CONFIGS.append(
         exp_name="a100_behavior_v2_flow1_bs16",
         batch_size=16,
         num_workers=6,
-        num_train_steps=400_000,
-        save_interval=5_000,
-        keep_period=25_000,
         overwrite=False,
         resume=False,
     )
